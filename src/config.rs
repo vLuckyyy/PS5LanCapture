@@ -111,6 +111,7 @@ pub struct UiSettings {
     pub auto_reconnect: bool,
     pub minimize_to_tray: bool,
     pub auto_hide_controls: bool,
+    pub check_for_updates: bool,
     pub window_size: Option<(u32, u32)>,
 }
 
@@ -121,6 +122,7 @@ impl Default for UiSettings {
             auto_reconnect: true,
             minimize_to_tray: false,
             auto_hide_controls: true,
+            check_for_updates: true,
             window_size: None,
         }
     }

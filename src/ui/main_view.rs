@@ -61,6 +61,7 @@ fn top_bar(ui: &mut Ui, app: &mut App) {
                 }
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    super::update::top_bar_button(ui, app);
                     if ui
                         .button("⚙ Settings")
                         .on_hover_text("App settings")

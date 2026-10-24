@@ -26,7 +26,8 @@ The official PS Remote Play app was laggy and the picture quality was bad. So I 
 - Xbox controllers work too (PS button = Back + Start)
 - Setup wizard: finds the console, registers it, checks your controller and audio
 - Wakes the console from rest mode, reconnects automatically
-- Login data is encrypted with Windows DPAPI. No telemetry.
+- Built in updater: when a new release appears here, the app shows an Update button and installs it for you
+- Login data is encrypted with Windows DPAPI. No telemetry. The only internet requests are the PSN sign in during setup and the GitHub update check (can be turned off in Settings).
 
 ## Requirements
 
@@ -38,7 +39,7 @@ The official PS Remote Play app was laggy and the picture quality was bad. So I 
 
 ## Install
 
-Download the latest release from the [Releases](https://github.com/vLuckyyy/ps5-lan-capture/releases) page:
+Download the latest release from the [Releases](https://github.com/vLuckyyy/PS5LanCapture/releases) page:
 
 - `PS5-LAN-Capture-Setup-x.y.z.exe` installer, or
 - `PS5-LAN-Capture-x.y.z-portable.zip`, unzip and run `PS5LanCapture.exe`
@@ -56,13 +57,21 @@ Then follow the setup wizard.
 You need Rust, Git, Python 3, Visual Studio 2022 Build Tools (C++ workload) and LLVM (clang-cl).
 
 ```powershell
-git clone --recurse-submodules https://github.com/vLuckyyy/ps5-lan-capture.git
-cd ps5-lan-capture
+git clone --recurse-submodules https://github.com/vLuckyyy/PS5LanCapture.git
+cd PS5LanCapture
 powershell -ExecutionPolicy Bypass -File scripts\setup-deps.ps1
 cargo build --release
 ```
 
 `scripts\setup-deps.ps1` downloads vcpkg libraries and FFmpeg into `.tools\`. `scripts\package.ps1` builds the installer and the release files into `dist\` (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)).
+
+## Releasing a new version
+
+1. Bump `version` in `Cargo.toml`.
+2. Run `scripts\package.ps1`.
+3. Create a GitHub release with tag `vX.Y.Z` (not a pre-release) and upload everything from `dist\`.
+
+The app checks the latest release on startup and every 6 hours. It needs the `PS5-LAN-Capture-Setup-X.Y.Z.exe` and `SHA256SUMS.txt` assets to update itself; portable copies get a link to the release page.
 
 ## Credits
 
