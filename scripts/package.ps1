@@ -70,7 +70,8 @@ Get-ChildItem -Recurse -Force $src -Filter '.git' | Remove-Item -Recurse -Force
 Compress-Archive -Path $src -DestinationPath "$dist\PS5-LAN-Capture-$version-source.zip" -CompressionLevel Optimal
 Remove-Item -Recurse -Force (Join-Path $dist 'src-stage'), $stage
 
-Get-ChildItem $dist -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object {
-    "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
-} | Set-Content -Encoding ascii "$dist\SHA256SUMS.txt"
+$sums = Get-ChildItem $dist -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object {
+    "{0}  {1}`n" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+}
+[System.IO.File]::WriteAllText("$dist\SHA256SUMS.txt", ($sums -join ''))
 Get-ChildItem $dist | Format-Table Name, Length
