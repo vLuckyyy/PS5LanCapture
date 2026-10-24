@@ -345,6 +345,7 @@ fn interface_tab(ui: &mut Ui, app: &mut App) {
         app.stream.set_auto_reconnect(reconnect);
         app.mark_dirty();
     }
+    super::update::settings_section(ui, app);
     ui.add_space(8.0);
     if ui.button("How to share on Discord").clicked() {
         app.discord_help_open = true;

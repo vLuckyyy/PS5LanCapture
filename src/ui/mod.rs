@@ -3,6 +3,7 @@ pub mod main_view;
 pub mod pad;
 pub mod settings;
 pub mod theme;
+pub mod update;
 pub mod widgets;
 pub mod wizard;
 
@@ -24,6 +25,7 @@ pub struct VideoView {
 pub enum WindowRequest {
     ToggleFullscreen,
     ExitFullscreen,
+    Quit,
 }
 
 pub struct DiscoveryHub {
@@ -91,6 +93,8 @@ pub struct App {
     pub config: AppConfig,
     pub audio: AudioOutput,
     pub controller: ControllerManager,
+    pub updater: crate::updater::Updater,
+    pub update_open: bool,
     pub stream: StreamController,
     pub discovery: DiscoveryHub,
     pub hosts: Vec<DiscoveredHost>,
@@ -119,6 +123,7 @@ impl App {
         config: AppConfig,
         audio: AudioOutput,
         controller: ControllerManager,
+        updater: crate::updater::Updater,
         stream: StreamController,
         native_version: String,
     ) -> Self {
@@ -128,6 +133,8 @@ impl App {
             config,
             audio,
             controller,
+            updater,
+            update_open: false,
             stream,
             discovery: DiscoveryHub::new(),
             hosts: Vec::new(),
@@ -268,6 +275,11 @@ impl App {
         {
             self.refresh_audio_devices();
         }
+        if let Some(version) = self.updater.tick(self.config.ui.check_for_updates) {
+            self.notify(format!(
+                "Version {version} is available. Use the Update button in the top bar."
+            ));
+        }
         if self.config_dirty && self.last_save.elapsed() > Duration::from_millis(800) {
             self.save_now();
         }
@@ -301,6 +313,7 @@ impl App {
         settings::window(ui.ctx(), self);
         help::discord_window(ui.ctx(), &mut self.discord_help_open);
         help::about_window(ui.ctx(), &mut self.about_open, &self.native_version);
+        update::window(ui.ctx(), self);
         help::logs_window(ui.ctx(), &mut self.logs_open, &self.paths);
         self.login_pin_modal(ui.ctx());
         self.notice_toast(ui.ctx());

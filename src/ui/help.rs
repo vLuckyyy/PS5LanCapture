@@ -58,7 +58,7 @@ pub fn about_window(ctx: &egui::Context, open: &mut bool, native_version: &str) 
             ui.label(RichText::new(native_version).color(theme::MUTED));
             ui.add_space(6.0);
             ui.label("License: GNU Affero General Public License v3.0 (AGPL-3.0)");
-            ui.hyperlink_to("Source code on GitHub", "https://github.com/vLuckyyy/ps5-lan-capture");
+            ui.hyperlink_to("Source code on GitHub", "https://github.com/vLuckyyy/PS5LanCapture");
             ui.add_space(6.0);
             ui.label(RichText::new("Components").strong());
             for (name, license) in [
@@ -79,7 +79,7 @@ pub fn about_window(ctx: &egui::Context, open: &mut bool, native_version: &str) 
                     .small()
                     .color(theme::MUTED),
             );
-            ui.label(RichText::new("No telemetry. The app only talks to your console on the local network and, when you ask for it during setup, to the PSN sign in server.").small().color(theme::MUTED));
+            ui.label(RichText::new("No telemetry. Besides your console on the local network, the app only contacts the PSN sign in server when you ask for it during setup, and GitHub to check for updates (can be turned off in Settings).").small().color(theme::MUTED));
         });
 }
 

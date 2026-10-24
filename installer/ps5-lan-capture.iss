@@ -13,8 +13,8 @@ AppId={{7B3F2C1E-5A4D-4E8B-9C21-0F6A9D3E5B71}
 AppName=PS5 LAN Capture
 AppVersion={#AppVersion}
 AppPublisher=vLuckyyy
-AppPublisherURL=https://github.com/vLuckyyy/ps5-lan-capture
-AppSupportURL=https://github.com/vLuckyyy/ps5-lan-capture/issues
+AppPublisherURL=https://github.com/vLuckyyy/PS5LanCapture
+AppSupportURL=https://github.com/vLuckyyy/PS5LanCapture/issues
 DefaultDirName={autopf}\PS5 LAN Capture
 DefaultGroupName=PS5 LAN Capture
 DisableProgramGroupPage=yes
@@ -31,7 +31,8 @@ UninstallDisplayIcon={app}\PS5LanCapture.exe
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
-CloseApplications=yes
+CloseApplications=force
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -49,3 +50,10 @@ Name: "{autodesktop}\PS5 LAN Capture"; Filename: "{app}\PS5LanCapture.exe"; Task
 
 [Run]
 Filename: "{app}\PS5LanCapture.exe"; Description: "{cm:LaunchProgram,PS5 LAN Capture}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\PS5LanCapture.exe"; Flags: nowait runasoriginaluser; Check: IsUpdate
+
+[Code]
+function IsUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:UPDATE|0}') = '1';
+end;

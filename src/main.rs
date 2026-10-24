@@ -4,6 +4,7 @@ mod audio;
 mod config;
 mod controller;
 mod dpapi;
+mod http;
 mod logging;
 mod native;
 mod psn;
@@ -11,6 +12,7 @@ mod render;
 mod session;
 mod tray;
 mod ui;
+mod updater;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -135,11 +137,12 @@ impl Runner {
         self.minimized = false;
     }
 
-    fn handle_requests(&mut self) {
+    fn handle_requests(&mut self) -> bool {
         let requests = std::mem::take(&mut self.app.requests);
         let Some(window) = self.window.clone() else {
-            return;
+            return false;
         };
+        let mut quit = false;
         for request in requests {
             match request {
                 WindowRequest::ToggleFullscreen => {
@@ -151,8 +154,10 @@ impl Runner {
                     window.set_fullscreen(None);
                     self.app.fullscreen = false;
                 }
+                WindowRequest::Quit => quit = true,
             }
         }
+        quit
     }
 
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
@@ -161,13 +166,14 @@ impl Runner {
         event_loop.exit();
     }
 
-    fn redraw(&mut self) {
+    /// Returns true when the UI asked the app to quit.
+    fn redraw(&mut self) -> bool {
         let (Some(window), Some(renderer), Some(egui_winit)) = (
             self.window.clone(),
             self.renderer.as_mut(),
             self.egui_winit.as_mut(),
         ) else {
-            return;
+            return false;
         };
         self.last_redraw = Instant::now();
         let session_id = self.app.stream.session().map(|s| s.id()).unwrap_or(0);
@@ -218,7 +224,7 @@ impl Runner {
         }
         self.next_repaint =
             (repaint_delay < Duration::from_secs(3600)).then(|| Instant::now() + repaint_delay);
-        self.handle_requests();
+        self.handle_requests()
     }
 }
 
@@ -280,8 +286,8 @@ impl ApplicationHandler<UserEvent> for Runner {
                     window.request_redraw();
                 }
             }
-            WindowEvent::RedrawRequested if !self.minimized => {
-                self.redraw();
+            WindowEvent::RedrawRequested if !self.minimized && self.redraw() => {
+                self.quit(event_loop);
             }
             _ => {}
         }
@@ -401,8 +407,17 @@ fn main() {
     });
     let controller =
         controller::ControllerManager::start(&config.controller.settings(), waker.clone());
+    let updater = updater::Updater::new(waker.clone());
     let stream = StreamController::new(audio.sink(), controller.shared(), waker);
-    let app = App::new(paths, config, audio, controller, stream, native_version);
+    let app = App::new(
+        paths,
+        config,
+        audio,
+        controller,
+        updater,
+        stream,
+        native_version,
+    );
 
     let egui_ctx = egui::Context::default();
     ui::theme::apply(&egui_ctx);
