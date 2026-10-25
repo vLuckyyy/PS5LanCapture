@@ -1,6 +1,6 @@
 [package]
 name = "ps5-lan-capture"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Mirror PS5 video and audio to your PC over LAN (PS Remote Play) so you can share it on Discord"
