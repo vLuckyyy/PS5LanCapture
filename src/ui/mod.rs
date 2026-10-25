@@ -1,6 +1,7 @@
 pub mod help;
 pub mod main_view;
 pub mod pad;
+pub mod quality;
 pub mod settings;
 pub mod theme;
 pub mod update;
@@ -98,6 +99,8 @@ pub struct App {
     pub controller: ControllerManager,
     pub updater: crate::updater::Updater,
     pub update_open: bool,
+    pub quality_open: bool,
+    pub quality_test: Option<crate::quality_test::QualityTest>,
     pub stream: StreamController,
     pub discovery: DiscoveryHub,
     pub hosts: Vec<DiscoveredHost>,
@@ -117,6 +120,7 @@ pub struct App {
     pub requests: Vec<WindowRequest>,
     pub gpu_error: Option<String>,
     pub rtx_possible: bool,
+    pub render_device: *mut std::ffi::c_void,
     config_dirty: bool,
     last_save: Instant,
 }
@@ -139,6 +143,8 @@ impl App {
             controller,
             updater,
             update_open: false,
+            quality_open: false,
+            quality_test: None,
             stream,
             discovery: DiscoveryHub::new(),
             hosts: Vec::new(),
@@ -158,6 +164,7 @@ impl App {
             requests: Vec::new(),
             gpu_error: None,
             rtx_possible: false,
+            render_device: std::ptr::null_mut(),
             config_dirty: false,
             last_save: Instant::now(),
         };
@@ -211,7 +218,22 @@ impl App {
         self.connect_to(console);
     }
 
+    pub fn selected_target(&self) -> Result<ConnectTarget, String> {
+        let console = self
+            .selected_console()
+            .cloned()
+            .ok_or("Register a console in the setup first.")?;
+        let secret = ConsoleSecret::open(&console.protected_secret).map_err(|_| {
+            "Cannot read the encrypted registration data. Register the console again.".to_string()
+        })?;
+        Ok(ConnectTarget { console, secret })
+    }
+
     pub fn connect_to(&mut self, console: ConsoleEntry) {
+        if self.quality_test.as_ref().is_some_and(|t| !t.finished) {
+            self.notify("Wait for the quality test to finish or cancel it first.");
+            return;
+        }
         let secret = match ConsoleSecret::open(&console.protected_secret) {
             Ok(s) => s,
             Err(e) => {
@@ -232,6 +254,7 @@ impl App {
 
     /// Per-frame housekeeping independent of rendering.
     pub fn tick(&mut self, device: *mut std::ffi::c_void) {
+        self.render_device = device;
         let mut addresses: Vec<String> = self
             .config
             .consoles
@@ -274,6 +297,9 @@ impl App {
         });
         let video = self.config.video.clone();
         self.stream.tick(&video, device, ready.flatten());
+        if let Some(test) = &mut self.quality_test {
+            test.tick();
+        }
 
         if self.audio_devices_refreshed.elapsed() > Duration::from_secs(5)
             && (self.settings_open || self.wizard.is_some())
@@ -319,6 +345,7 @@ impl App {
         help::discord_window(ui.ctx(), &mut self.discord_help_open);
         help::about_window(ui.ctx(), &mut self.about_open, &self.native_version);
         update::window(ui.ctx(), self);
+        quality::window(ui.ctx(), self);
         help::logs_window(ui.ctx(), &mut self.logs_open, &self.paths);
         self.login_pin_modal(ui.ctx());
         self.notice_toast(ui.ctx());
@@ -383,9 +410,11 @@ impl App {
             self.stream.state,
             StreamState::Streaming { .. } | StreamState::Connecting { .. }
         ) || self.wizard.as_ref().is_some_and(|w| w.is_busy())
+            || self.quality_test.as_ref().is_some_and(|t| !t.finished)
     }
 
     pub fn shutdown(&mut self) {
+        self.quality_test = None;
         self.save_now();
         self.stream.shutdown();
     }

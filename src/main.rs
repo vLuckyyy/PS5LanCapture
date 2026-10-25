@@ -10,6 +10,7 @@ mod http;
 mod logging;
 mod native;
 mod psn;
+mod quality_test;
 mod render;
 mod session;
 mod tray;

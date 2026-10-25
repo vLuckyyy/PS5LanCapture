@@ -154,7 +154,12 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             egui::ComboBox::from_id_salt("resolution")
                 .selected_text(video.resolution.label())
                 .show_ui(ui, |ui| {
-                    for r in [Resolution::P1080, Resolution::P720] {
+                    for r in [
+                        Resolution::P1080,
+                        Resolution::P720,
+                        Resolution::P1440,
+                        Resolution::P2160,
+                    ] {
                         ui.selectable_value(&mut video.resolution, r, r.label());
                     }
                 });
@@ -167,7 +172,7 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             ui.end_row();
             ui.label("Bitrate");
             ui.add(
-                egui::Slider::new(&mut video.bitrate_kbps, 2_000..=40_000)
+                egui::Slider::new(&mut video.bitrate_kbps, 2_000..=crate::config::MAX_BITRATE_KBPS)
                     .suffix(" kb/s")
                     .step_by(500.0),
             );
@@ -218,14 +223,24 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
         app.mark_dirty();
     }
     ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui
+            .button("Find best quality")
+            .on_hover_text("Tries higher resolutions and bitrates on your console and recommends the best working setup")
+            .clicked()
+        {
+            app.quality_open = true;
+        }
+    });
+    ui.add_space(6.0);
     info_box(
         ui,
         theme::MUTED,
-        "Remote Play streams up to 1080p at 60 FPS. Codec, HDR and bitrate apply on the next connection; enhance settings apply right away.",
+        "Remote Play officially streams up to 1080p at 60 FPS; 1440p and 2160p are experimental. Codec, HDR, resolution and bitrate apply on the next connection; enhance settings apply right away.",
     );
     if app.config.video.upscaling != Upscaling::Off {
         let text = if app.config.video.upscaling == Upscaling::Auto && app.rtx_possible {
-            "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor).              RTX Video Super Resolution needs RTX video enhancement > Super resolution turned on in the NVIDIA Control Panel              (Video > Adjust video image settings). Without it the image is only resized."
+            "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor). RTX Video Super Resolution needs RTX video enhancement > Super resolution turned on in the NVIDIA Control Panel (Video > Adjust video image settings). Without it the image is only resized."
         } else {
             "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor)."
         };

@@ -120,6 +120,30 @@ pub fn friendly_quit_message(reason: i32, raw: &str) -> String {
     }
 }
 
+pub fn session_params(
+    target: &ConnectTarget,
+    video: &VideoSettings,
+    size: (u32, u32),
+    bitrate_kbps: u32,
+    device: *mut std::ffi::c_void,
+) -> SessionParams {
+    SessionParams {
+        host: target.console.address.clone(),
+        ps5: target.console.is_ps5,
+        regist_key: target.secret.regist_key,
+        morning: target.secret.rp_key,
+        width: size.0,
+        height: size.1,
+        fps: video.fps,
+        bitrate: bitrate_kbps,
+        hevc: video.hevc && target.console.is_ps5,
+        hdr: video.hdr,
+        prefer_hw_decode: video.hardware_decoding,
+        d3d11_device: device,
+        packet_loss_max: 0.05,
+    }
+}
+
 pub fn is_retryable(reason: i32) -> bool {
     matches!(reason, 2 | 7 | 8 | 10 | 11)
 }
@@ -149,6 +173,10 @@ impl StreamController {
             last_frame_progress: Instant::now(),
             stats: StreamStats::default(),
         }
+    }
+
+    pub fn waker(&self) -> Waker {
+        self.waker.clone()
     }
 
     pub fn session(&self) -> Option<&Session> {
@@ -258,21 +286,7 @@ impl StreamController {
         self.stop_session();
         self.generation += 1;
         let (width, height) = video.resolution.size();
-        let params = SessionParams {
-            host: target.console.address.clone(),
-            ps5: target.console.is_ps5,
-            regist_key: target.secret.regist_key,
-            morning: target.secret.rp_key,
-            width,
-            height,
-            fps: video.fps,
-            bitrate: video.bitrate_kbps,
-            hevc: video.hevc && target.console.is_ps5,
-            hdr: video.hdr,
-            prefer_hw_decode: video.hardware_decoding,
-            d3d11_device: device,
-            packet_loss_max: 0.05,
-        };
+        let params = session_params(&target, video, (width, height), video.bitrate_kbps, device);
         let sink = self.make_sink();
         log::info!(
             "Connecting to {} ({}) {}x{}@{} {} kb/s {}",

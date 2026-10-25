@@ -13,21 +13,35 @@ pub const CONFIG_VERSION: u32 = 1;
 pub enum Resolution {
     P720,
     P1080,
+    P1440,
+    P2160,
 }
+
+pub const MAX_BITRATE_KBPS: u32 = 100_000;
 
 impl Resolution {
     pub fn size(self) -> (u32, u32) {
         match self {
             Resolution::P720 => (1280, 720),
             Resolution::P1080 => (1920, 1080),
+            Resolution::P1440 => (2560, 1440),
+            Resolution::P2160 => (3840, 2160),
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Resolution::P720 => "1280×720 (720p)",
-            Resolution::P1080 => "1920×1080 (1080p)",
+            Resolution::P720 => "1280x720 (720p)",
+            Resolution::P1080 => "1920x1080 (1080p)",
+            Resolution::P1440 => "2560x1440 (experimental)",
+            Resolution::P2160 => "3840x2160 (experimental)",
         }
+    }
+
+    pub fn from_size(width: u32, height: u32) -> Option<Self> {
+        [Self::P720, Self::P1080, Self::P1440, Self::P2160]
+            .into_iter()
+            .find(|r| r.size() == (width, height))
     }
 }
 
@@ -281,7 +295,7 @@ impl AppConfig {
         if self.video.fps != 30 {
             self.video.fps = 60;
         }
-        self.video.bitrate_kbps = self.video.bitrate_kbps.clamp(2_000, 40_000);
+        self.video.bitrate_kbps = self.video.bitrate_kbps.clamp(2_000, MAX_BITRATE_KBPS);
         self.video.sharpness = self.video.sharpness.clamp(0.0, 1.0);
         self.video.deband = self.video.deband.clamp(0.0, 1.0);
     }
@@ -424,7 +438,7 @@ mod tests {
         assert_eq!(config.audio.volume, 1.0);
         assert_eq!(config.audio.latency_ms, 20);
         assert_eq!(config.video.fps, 60);
-        assert_eq!(config.video.bitrate_kbps, 40_000);
+        assert_eq!(config.video.bitrate_kbps, MAX_BITRATE_KBPS);
     }
 
     #[test]
