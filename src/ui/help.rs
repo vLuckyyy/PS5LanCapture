@@ -65,6 +65,7 @@ pub fn about_window(ctx: &egui::Context, open: &mut bool, native_version: &str) 
                 ("chiaki-ng (PS Remote Play protocol)", "AGPL-3.0 with OpenSSL exception"),
                 ("FFmpeg (libavcodec, libavutil, libswresample)", "LGPL-2.1+, shipped as DLLs"),
                 ("Opus", "BSD-3-Clause"),
+                ("AMD FidelityFX Super Resolution 1", "MIT"),
                 ("OpenSSL", "Apache-2.0"),
                 ("libcurl", "curl license (MIT/X)"),
                 ("json-c, libevent, miniupnpc, nanopb, jerasure, gf-complete", "MIT/BSD/zlib"),

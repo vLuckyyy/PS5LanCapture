@@ -31,6 +31,23 @@ impl Resolution {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Upscaling {
+    Off,
+    Auto,
+    Fsr,
+}
+
+impl Upscaling {
+    pub fn label(self) -> &'static str {
+        match self {
+            Upscaling::Off => "Off",
+            Upscaling::Auto => "RTX Video Super Resolution (FSR fallback)",
+            Upscaling::Fsr => "AMD FSR 1",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VideoSettings {
@@ -39,6 +56,8 @@ pub struct VideoSettings {
     pub bitrate_kbps: u32,
     pub hevc: bool,
     pub hardware_decoding: bool,
+    pub upscaling: Upscaling,
+    pub sharpness: f32,
 }
 
 impl Default for VideoSettings {
@@ -49,6 +68,8 @@ impl Default for VideoSettings {
             bitrate_kbps: 15_000,
             hevc: true,
             hardware_decoding: true,
+            upscaling: Upscaling::Auto,
+            sharpness: 0.8,
         }
     }
 }
@@ -255,6 +276,7 @@ impl AppConfig {
             self.video.fps = 60;
         }
         self.video.bitrate_kbps = self.video.bitrate_kbps.clamp(2_000, 40_000);
+        self.video.sharpness = self.video.sharpness.clamp(0.0, 1.0);
     }
 
     pub fn console(&self, host_id: &str) -> Option<&ConsoleEntry> {

@@ -11,7 +11,9 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::core::{Interface, PCSTR, s};
 
+use crate::config::Upscaling;
 use crate::native;
+use crate::upscale::{ScalerKind, Upscaler};
 
 const SHADER: &str = r#"
 Texture2D<float> luma : register(t0);
@@ -53,6 +55,7 @@ pub struct VideoSurface {
     luma_srv: ID3D11ShaderResourceView,
     chroma_srv: ID3D11ShaderResourceView,
     _rgb: ID3D11Texture2D,
+    rgb_srv: ID3D11ShaderResourceView,
     rgb_rtv: ID3D11RenderTargetView,
     pub texture_id: egui::TextureId,
     pub sequence: u64,
@@ -69,10 +72,20 @@ pub struct Renderer {
     pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
     video: Option<VideoSurface>,
+    upscaler: Upscaler,
     size: (u32, u32),
 }
 
-fn compile(source: &str, entry: PCSTR, target: PCSTR) -> Result<ID3DBlob, String> {
+/// The texture to show for the current video frame.
+#[derive(Clone, Copy, Debug)]
+pub struct VideoOutput {
+    pub texture_id: egui::TextureId,
+    pub size: [u32; 2],
+    pub source: [u32; 2],
+    pub scaler: Option<ScalerKind>,
+}
+
+pub(crate) fn compile(source: &str, entry: PCSTR, target: PCSTR) -> Result<ID3DBlob, String> {
     let mut blob = None;
     let mut errors = None;
     let result = unsafe {
@@ -102,10 +115,10 @@ fn compile(source: &str, entry: PCSTR, target: PCSTR) -> Result<ID3DBlob, String
             .unwrap_or_default();
         return Err(format!("Shader compilation failed: {e} {detail}"));
     }
-    blob.ok_or_else(|| "Pusty shader".to_string())
+    blob.ok_or_else(|| "Empty shader".to_string())
 }
 
-fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
+pub(crate) fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(blob.GetBufferPointer() as *const u8, blob.GetBufferSize())
     }
@@ -196,7 +209,8 @@ impl Renderer {
         unsafe { device.CreateSamplerState(&sampler_desc, Some(&mut sampler)) }
             .map_err(|e| err("Sampler", e))?;
 
-        let egui = egui_directx11::Renderer::new(&device).map_err(|e| err("Renderer egui", e))?;
+        let egui = egui_directx11::Renderer::new(&device).map_err(|e| err("egui renderer", e))?;
+        let upscaler = Upscaler::new(&device, &context);
         let mut renderer = Self {
             device,
             context,
@@ -207,6 +221,7 @@ impl Renderer {
             pixel_shader: pixel_shader.unwrap(),
             sampler: sampler.unwrap(),
             video: None,
+            upscaler,
             size: (width.max(1), height.max(1)),
         };
         renderer.create_back_buffer()?;
@@ -257,11 +272,8 @@ impl Renderer {
         }
     }
 
-    pub fn video(&self) -> Option<&VideoSurface> {
-        self.video.as_ref()
-    }
-
     pub fn drop_video(&mut self) {
+        self.upscaler.reset(&mut self.egui);
         if let Some(video) = self.video.take() {
             self.egui.unregister_user_texture(video.texture_id);
         }
@@ -300,7 +312,7 @@ impl Renderer {
                 Quality: 0,
             },
             Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_DECODER.0) as u32,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
@@ -323,7 +335,7 @@ impl Renderer {
             let mut yuv = None;
             self.device
                 .CreateTexture2D(&yuv_desc, None, Some(&mut yuv))
-                .map_err(|e| format!("Tekstura YUV: {e}"))?;
+                .map_err(|e| format!("YUV texture: {e}"))?;
             let yuv = yuv.unwrap();
             let mut luma_srv = None;
             let mut chroma_srv = None;
@@ -340,7 +352,7 @@ impl Renderer {
             let mut rgb = None;
             self.device
                 .CreateTexture2D(&rgb_desc, None, Some(&mut rgb))
-                .map_err(|e| format!("Tekstura RGB: {e}"))?;
+                .map_err(|e| format!("RGB texture: {e}"))?;
             let rgb = rgb.unwrap();
             let mut rgb_rtv = None;
             let mut rgb_srv = None;
@@ -353,7 +365,8 @@ impl Renderer {
             let rgb_rtv = rgb_rtv.unwrap();
             self.context
                 .ClearRenderTargetView(&rgb_rtv, &[0.0, 0.0, 0.0, 1.0]);
-            let texture_id = self.egui.register_user_texture(rgb_srv.unwrap());
+            let rgb_srv = rgb_srv.unwrap();
+            let texture_id = self.egui.register_user_texture(rgb_srv.clone());
             log::info!(
                 "Video surface {width}x{height} ({})",
                 if format == native::FORMAT_P010 {
@@ -370,6 +383,7 @@ impl Renderer {
                 luma_srv: luma_srv.unwrap(),
                 chroma_srv: chroma_srv.unwrap(),
                 _rgb: rgb,
+                rgb_srv,
                 rgb_rtv,
                 texture_id,
                 sequence: 0,
@@ -433,6 +447,45 @@ impl Renderer {
             self.context.OMSetRenderTargets(None, None);
         }
         true
+    }
+
+    /// Picks the texture to show, upscaling the frame to `target` pixels when that is enabled.
+    pub fn video_output(
+        &mut self,
+        mode: Upscaling,
+        sharpness: f32,
+        target: Option<[u32; 2]>,
+    ) -> Option<VideoOutput> {
+        let video = self.video.as_ref().filter(|v| v.has_frame)?;
+        let source = [video.width, video.height];
+        let scaled = self.upscaler.process(
+            &mut self.egui,
+            mode,
+            sharpness,
+            video.sequence,
+            (video.width, video.height),
+            &video.yuv,
+            &video.rgb_srv,
+            target,
+        );
+        Some(match scaled {
+            Some(s) => VideoOutput {
+                texture_id: s.texture_id,
+                size: s.size,
+                source,
+                scaler: Some(s.kind),
+            },
+            None => VideoOutput {
+                texture_id: video.texture_id,
+                size: source,
+                source,
+                scaler: None,
+            },
+        })
+    }
+
+    pub fn rtx_possible(&self) -> bool {
+        self.upscaler.rtx_possible()
     }
 
     pub fn render(

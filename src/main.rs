@@ -13,6 +13,7 @@ mod session;
 mod tray;
 mod ui;
 mod updater;
+mod upscale;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -190,10 +191,19 @@ impl Runner {
             None if !self.app.stream.state.is_active() => renderer.drop_video(),
             None => {}
         }
-        let video = renderer.video().filter(|v| v.has_frame).map(|v| VideoView {
-            texture_id: v.texture_id,
-            size: [v.width, v.height],
-        });
+        let target = self
+            .egui_ctx
+            .data(|d| d.get_temp::<[u32; 2]>(egui::Id::new(ui::widgets::VIDEO_TARGET_ID)));
+        let settings = &self.app.config.video;
+        let video = renderer
+            .video_output(settings.upscaling, settings.sharpness, target)
+            .map(|v| VideoView {
+                texture_id: v.texture_id,
+                size: v.size,
+                source: v.source,
+                scaler: v.scaler,
+            });
+        self.app.rtx_possible = renderer.rtx_possible();
 
         let input = egui_winit.take_egui_input(&window);
         let app = &mut self.app;

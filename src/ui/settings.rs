@@ -4,7 +4,7 @@ use super::widgets::info_box;
 use super::wizard::{Step, Wizard};
 use super::{App, theme};
 use crate::audio;
-use crate::config::Resolution;
+use crate::config::{Resolution, Upscaling};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Tab {
@@ -178,6 +178,20 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             ui.label("Decoding");
             ui.checkbox(&mut video.hardware_decoding, "Hardware (GPU, D3D11VA)");
             ui.end_row();
+            ui.label("Upscaling");
+            egui::ComboBox::from_id_salt("upscaling")
+                .selected_text(video.upscaling.label())
+                .show_ui(ui, |ui| {
+                    for mode in [Upscaling::Auto, Upscaling::Fsr, Upscaling::Off] {
+                        ui.selectable_value(&mut video.upscaling, mode, mode.label());
+                    }
+                });
+            ui.end_row();
+            if video.upscaling != Upscaling::Off {
+                ui.label("FSR sharpness");
+                ui.add(egui::Slider::new(&mut video.sharpness, 0.0..=1.0).show_value(false));
+                ui.end_row();
+            }
         });
     if *video != before {
         app.mark_dirty();
@@ -188,6 +202,14 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
         theme::MUTED,
         "Remote Play streams up to 1080p at 60 FPS in SDR. Changes apply on the next connection.",
     );
+    if app.config.video.upscaling != Upscaling::Off {
+        let text = if app.config.video.upscaling == Upscaling::Auto && app.rtx_possible {
+            "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor).              RTX Video Super Resolution needs an RTX GPU with RTX video enhancement > Super resolution turned on in the NVIDIA Control Panel              (Video > Adjust video image settings). Without it the image is only resized."
+        } else {
+            "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor)."
+        };
+        info_box(ui, theme::MUTED, text);
+    }
     if app.stream.state.is_active() && ui.button("Reconnect to apply").clicked() {
         app.stream.disconnect();
         app.connect_selected();

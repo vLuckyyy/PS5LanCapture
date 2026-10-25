@@ -20,6 +20,7 @@ The official PS Remote Play app was laggy and the picture quality was bad. So I 
 ## Features
 
 - Up to 1080p at 60 FPS, H.265 hardware decoding on the GPU (Direct3D 11)
+- Upscaling for big windows and fullscreen on 1440p/4K monitors: NVIDIA RTX Video Super Resolution, with AMD FSR 1 on other GPUs
 - Game audio through any Windows output device, with volume, mute and buffer settings
 - DualSense over USB or Bluetooth: buttons, sticks, triggers, touchpad, gyro
 - Rumble, adaptive triggers and lightbar color from the console
@@ -45,6 +46,10 @@ Download the latest release from the [Releases](https://github.com/vLuckyyy/PS5L
 - `PS5-LAN-Capture-x.y.z-portable.zip`, unzip and run `PS5LanCapture.exe`
 
 Then follow the setup wizard.
+
+## Sharper picture on big screens
+
+The PS5 sends at most 1080p. When the video on screen is bigger (fullscreen on a 1440p or 4K monitor), the app upscales it. On NVIDIA RTX cards it uses RTX Video Super Resolution: turn on **RTX video enhancement > Super resolution** in NVIDIA Control Panel (Video > Adjust video image settings). Other GPUs use AMD FSR 1. You can change this in Settings > Video.
 
 ## Sharing on Discord
 
@@ -77,6 +82,7 @@ The app checks the latest release on startup and every 6 hours. It needs the `PS
 
 - [chiaki-ng](https://github.com/streetpea/chiaki-ng) for the Remote Play protocol
 - [FFmpeg](https://ffmpeg.org) for video decoding
+- [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) for upscaling
 - [egui](https://github.com/emilk/egui), [winit](https://github.com/rust-windowing/winit), [cpal](https://github.com/RustAudio/cpal), [hidapi](https://github.com/ruabmbua/hidapi-rs)
 
 ## License

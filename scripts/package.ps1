@@ -34,6 +34,7 @@ $licenses = @{
     'nanopb.txt'      = "$chiaki\third-party\nanopb\LICENSE.txt"
     'jerasure.txt'    = "$chiaki\third-party\jerasure\COPYING"
     'gf-complete.txt' = "$chiaki\third-party\gf-complete\COPYING"
+    'FidelityFX-FSR.txt' = "$root\shaders\fsr\LICENSE.txt"
 }
 foreach ($pkg in 'openssl', 'opus', 'json-c', 'libevent', 'miniupnpc') {
     $licenses["$pkg.txt"] = "$share\$pkg\copyright"

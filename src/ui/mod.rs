@@ -19,6 +19,8 @@ use crate::session::{ConnectTarget, StreamController, StreamState};
 pub struct VideoView {
     pub texture_id: egui::TextureId,
     pub size: [u32; 2],
+    pub source: [u32; 2],
+    pub scaler: Option<crate::upscale::ScalerKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +115,7 @@ pub struct App {
     pub last_activity: Instant,
     pub requests: Vec<WindowRequest>,
     pub gpu_error: Option<String>,
+    pub rtx_possible: bool,
     config_dirty: bool,
     last_save: Instant,
 }
@@ -153,6 +156,7 @@ impl App {
             last_activity: Instant::now(),
             requests: Vec::new(),
             gpu_error: None,
+            rtx_possible: false,
             config_dirty: false,
             last_save: Instant::now(),
         };

@@ -69,17 +69,33 @@ pub fn status_chip(ui: &mut Ui, state: &StreamState) {
 }
 
 /// Paints the video letterboxed into `rect`; returns the response for the full area.
+pub const VIDEO_TARGET_ID: &str = "video-target-px";
+
+/// Paints the video letterboxed into `rect` and remembers the on-screen size in physical pixels,
+/// which the renderer uses as the upscaling target on the next frame.
 pub fn video_area(ui: &mut Ui, rect: Rect, video: Option<&VideoView>) -> Response {
     let response = ui.allocate_rect(rect, Sense::click());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
     if let Some(video) = video {
-        let aspect = video.size[0] as f32 / video.size[1].max(1) as f32;
+        let ppp = ui.ctx().pixels_per_point();
+        let aspect = video.source[0] as f32 / video.source[1].max(1) as f32;
         let mut size = vec2(rect.width(), rect.width() / aspect);
         if size.y > rect.height() {
             size = vec2(rect.height() * aspect, rect.height());
         }
-        let target = Rect::from_center_size(rect.center(), size);
+        let physical = [(size.x * ppp).round() as u32, (size.y * ppp).round() as u32];
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::new(VIDEO_TARGET_ID), physical));
+        let exact = vec2(video.size[0] as f32, video.size[1] as f32) / ppp;
+        if (exact - size).abs().max_elem() < 3.0 {
+            size = exact;
+        }
+        let mut target = Rect::from_center_size(rect.center(), size);
+        target = target.translate(vec2(
+            (target.min.x * ppp).round() / ppp - target.min.x,
+            (target.min.y * ppp).round() / ppp - target.min.y,
+        ));
         painter.image(
             video.texture_id,
             target,

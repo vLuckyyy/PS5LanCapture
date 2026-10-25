@@ -32,7 +32,7 @@ pub fn ui(ui: &mut Ui, app: &mut App, video: Option<&VideoView>) {
                 placeholder(ui, app, rect);
             }
             if app.config.ui.show_stats && app.stream.state.is_active() {
-                stats_overlay(ui, app, rect);
+                stats_overlay(ui, app, rect, video);
             }
             if hide_controls {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
@@ -272,12 +272,12 @@ fn placeholder(ui: &mut Ui, app: &mut App, rect: egui::Rect) {
     }
 }
 
-fn stats_overlay(ui: &mut Ui, app: &App, rect: egui::Rect) {
+fn stats_overlay(ui: &mut Ui, app: &App, rect: egui::Rect, video: Option<&VideoView>) {
     let stats = &app.stream.stats;
     let audio = app.audio.status();
     let area = egui::Rect::from_min_size(
         rect.right_top() + egui::vec2(-250.0, 10.0),
-        egui::vec2(240.0, 220.0),
+        egui::vec2(240.0, 245.0),
     );
     let mut child = ui.new_child(egui::UiBuilder::new().id_salt("stats").max_rect(area));
     egui::Frame::new()
@@ -309,6 +309,18 @@ fn stats_overlay(ui: &mut Ui, app: &App, rect: egui::Rect) {
                     None => "n/a",
                 }
             )));
+            ui.label(mono(
+                match video.and_then(|v| v.scaler.map(|k| (k, v.size))) {
+                    Some((kind, [w, h])) => format!(
+                        "Scaler    {} {w}x{h}",
+                        match kind {
+                            crate::upscale::ScalerKind::RtxVsr => "RTX VSR",
+                            crate::upscale::ScalerKind::Fsr => "FSR 1",
+                        }
+                    ),
+                    None => "Scaler    off".into(),
+                },
+            ));
             ui.label(mono(format!(
                 "Audio     {} / {} ms",
                 audio.buffered_ms, audio.target_ms
