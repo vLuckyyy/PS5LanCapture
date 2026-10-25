@@ -4,6 +4,8 @@ mod audio;
 mod config;
 mod controller;
 mod dpapi;
+#[cfg(test)]
+mod gpu_tests;
 mod http;
 mod logging;
 mod native;
@@ -186,7 +188,13 @@ impl Runner {
         }
         match self.app.stream.session() {
             Some(session) => {
-                renderer.update_video(session);
+                renderer.update_video(
+                    session,
+                    render::Enhance {
+                        better_chroma: self.app.config.video.better_chroma,
+                        deband: self.app.config.video.deband,
+                    },
+                );
             }
             None if !self.app.stream.state.is_active() => renderer.drop_video(),
             None => {}
@@ -202,6 +210,7 @@ impl Runner {
                 size: v.size,
                 source: v.source,
                 scaler: v.scaler,
+                hdr: v.hdr,
             });
         self.app.rtx_possible = renderer.rtx_possible();
 

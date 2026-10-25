@@ -277,7 +277,7 @@ fn stats_overlay(ui: &mut Ui, app: &App, rect: egui::Rect, video: Option<&VideoV
     let audio = app.audio.status();
     let area = egui::Rect::from_min_size(
         rect.right_top() + egui::vec2(-250.0, 10.0),
-        egui::vec2(240.0, 245.0),
+        egui::vec2(240.0, 270.0),
     );
     let mut child = ui.new_child(egui::UiBuilder::new().id_salt("stats").max_rect(area));
     egui::Frame::new()
@@ -311,16 +311,18 @@ fn stats_overlay(ui: &mut Ui, app: &App, rect: egui::Rect, video: Option<&VideoV
             )));
             ui.label(mono(
                 match video.and_then(|v| v.scaler.map(|k| (k, v.size))) {
-                    Some((kind, [w, h])) => format!(
-                        "Scaler    {} {w}x{h}",
-                        match kind {
-                            crate::upscale::ScalerKind::RtxVsr => "RTX VSR",
-                            crate::upscale::ScalerKind::Fsr => "FSR 1",
-                        }
-                    ),
-                    None => "Scaler    off".into(),
+                    Some((kind, [w, h])) => format!("Output    {} {w}x{h}", kind.short()),
+                    None => "Output    native".into(),
                 },
             ));
+            ui.label(mono(format!(
+                "Range     {}",
+                if video.is_some_and(|v| v.hdr) {
+                    "HDR10, tone mapped"
+                } else {
+                    "SDR"
+                }
+            )));
             ui.label(mono(format!(
                 "Audio     {} / {} ms",
                 audio.buffered_ms, audio.target_ms

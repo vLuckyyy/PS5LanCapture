@@ -428,6 +428,7 @@ typedef struct PslcDecoder
 	ID3D11Texture2D *staging;
 	uint32_t staging_width;
 	uint32_t staging_height;
+	DXGI_FORMAT staging_format;
 } PslcDecoder;
 
 static enum AVPixelFormat pslc_get_format(AVCodecContext *ctx, const enum AVPixelFormat *formats)
@@ -452,7 +453,7 @@ static int pslc_decoder_open(PslcDecoder *decoder, int codec, int prefer_hw, ID3
 		ID3D11Device_GetImmediateContext(device, &decoder->device_context);
 	}
 
-	const AVCodec *av_codec = avcodec_find_decoder(codec == PSLC_CODEC_H265 ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
+	const AVCodec *av_codec = avcodec_find_decoder(codec == PSLC_CODEC_H264 ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC);
 	if(!av_codec)
 	{
 		pslc_logf(PSLC_LOG_ERROR, "FFmpeg decoder for %s not available", codec == PSLC_CODEC_H265 ? "HEVC" : "H.264");
@@ -579,6 +580,9 @@ static int pslc_format_of(const AVFrame *frame)
 		case AV_PIX_FMT_YUVJ420P:
 		case AV_PIX_FMT_NV12:
 			return PSLC_FORMAT_NV12;
+		case AV_PIX_FMT_YUV420P10LE:
+		case AV_PIX_FMT_P010LE:
+			return PSLC_FORMAT_P010;
 		default:
 			return PSLC_FORMAT_NONE;
 	}
@@ -588,9 +592,11 @@ static int pslc_upload_software(PslcDecoder *decoder, const AVFrame *frame, ID3D
 {
 	uint32_t width = (uint32_t)frame->width & ~1u;
 	uint32_t height = (uint32_t)frame->height & ~1u;
+	int ten_bit = pslc_format_of(frame) == PSLC_FORMAT_P010;
+	DXGI_FORMAT format = ten_bit ? DXGI_FORMAT_P010 : DXGI_FORMAT_NV12;
 	if(!decoder->device || !decoder->device_context)
 		return 0;
-	if(!decoder->staging || decoder->staging_width != width || decoder->staging_height != height)
+	if(!decoder->staging || decoder->staging_width != width || decoder->staging_height != height || decoder->staging_format != format)
 	{
 		if(decoder->staging)
 		{
@@ -602,7 +608,7 @@ static int pslc_upload_software(PslcDecoder *decoder, const AVFrame *frame, ID3D
 		desc.Height = height;
 		desc.MipLevels = 1;
 		desc.ArraySize = 1;
-		desc.Format = DXGI_FORMAT_NV12;
+		desc.Format = format;
 		desc.SampleDesc.Count = 1;
 		desc.Usage = D3D11_USAGE_STAGING;
 		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -610,12 +616,42 @@ static int pslc_upload_software(PslcDecoder *decoder, const AVFrame *frame, ID3D
 			return 0;
 		decoder->staging_width = width;
 		decoder->staging_height = height;
+		decoder->staging_format = format;
 	}
 	D3D11_MAPPED_SUBRESOURCE mapped;
 	if(FAILED(ID3D11DeviceContext_Map(decoder->device_context, (ID3D11Resource *)decoder->staging, 0, D3D11_MAP_WRITE, 0, &mapped)))
 		return 0;
 	uint8_t *y_dst = mapped.pData;
 	uint8_t *uv_dst = y_dst + (size_t)mapped.RowPitch * height;
+	if(ten_bit)
+	{
+		for(uint32_t row = 0; row < height; row++)
+		{
+			const uint16_t *src = (const uint16_t *)(frame->data[0] + (size_t)row * frame->linesize[0]);
+			uint16_t *out = (uint16_t *)(y_dst + (size_t)row * mapped.RowPitch);
+			for(uint32_t col = 0; col < width; col++)
+				out[col] = frame->format == AV_PIX_FMT_P010LE ? src[col] : (uint16_t)(src[col] << 6);
+		}
+		for(uint32_t row = 0; row < height / 2; row++)
+		{
+			uint16_t *out = (uint16_t *)(uv_dst + (size_t)row * mapped.RowPitch);
+			if(frame->format == AV_PIX_FMT_P010LE)
+			{
+				memcpy(out, frame->data[1] + (size_t)row * frame->linesize[1], (size_t)width * 2);
+				continue;
+			}
+			const uint16_t *u = (const uint16_t *)(frame->data[1] + (size_t)row * frame->linesize[1]);
+			const uint16_t *v = (const uint16_t *)(frame->data[2] + (size_t)row * frame->linesize[2]);
+			for(uint32_t col = 0; col < width / 2; col++)
+			{
+				out[col * 2] = (uint16_t)(u[col] << 6);
+				out[col * 2 + 1] = (uint16_t)(v[col] << 6);
+			}
+		}
+		ID3D11DeviceContext_Unmap(decoder->device_context, (ID3D11Resource *)decoder->staging, 0);
+		ID3D11DeviceContext_CopyResource(decoder->device_context, (ID3D11Resource *)dst, (ID3D11Resource *)decoder->staging);
+		return 1;
+	}
 	for(uint32_t row = 0; row < height; row++)
 		memcpy(y_dst + (size_t)row * mapped.RowPitch, frame->data[0] + (size_t)row * frame->linesize[0], width);
 	if(frame->format == AV_PIX_FMT_NV12)
@@ -843,6 +879,8 @@ PSLC_API PslcSession *pslc_session_start(const PslcSessionConfig *config, PslcEv
 	s->touch_ids[0] = s->touch_ids[1] = -1;
 
 	int codec = config->ps5 ? config->codec : PSLC_CODEC_H264;
+	if(codec < PSLC_CODEC_H264 || codec > PSLC_CODEC_H265_HDR)
+		codec = PSLC_CODEC_H264;
 	s->decoder_inited = 1;
 	if(pslc_decoder_open(&s->decoder, codec, config->prefer_hw_decode, (ID3D11Device *)config->d3d11_device) != 0)
 	{
@@ -865,7 +903,7 @@ PSLC_API PslcSession *pslc_session_start(const PslcSessionConfig *config, PslcEv
 	info.video_profile.height = config->height;
 	info.video_profile.max_fps = config->fps;
 	info.video_profile.bitrate = config->bitrate;
-	info.video_profile.codec = codec == PSLC_CODEC_H265 ? CHIAKI_CODEC_H265 : CHIAKI_CODEC_H264;
+	info.video_profile.codec = codec == PSLC_CODEC_H265_HDR ? CHIAKI_CODEC_H265_HDR : codec == PSLC_CODEC_H265 ? CHIAKI_CODEC_H265 : CHIAKI_CODEC_H264;
 	info.video_profile_auto_downgrade = true;
 	info.enable_keyboard = false;
 	info.enable_dualsense = true;
@@ -980,6 +1018,7 @@ PSLC_API int pslc_session_frame_info(PslcSession *s, PslcFrameInfo *out)
 		out->height = (uint32_t)s->decoder.latest->height & ~1u;
 		out->format = pslc_format_of(s->decoder.latest);
 		out->hw = s->decoder.latest->format == AV_PIX_FMT_D3D11;
+		out->hdr = s->decoder.latest->color_trc == AVCOL_TRC_SMPTE2084;
 		out->sequence = s->decoder.sequence;
 	}
 	LeaveCriticalSection(&s->decoder.lock);

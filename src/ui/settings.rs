@@ -175,9 +175,22 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             ui.label("Codec");
             ui.checkbox(&mut video.hevc, "H.265/HEVC (recommended for PS5)");
             ui.end_row();
+            ui.label("HDR");
+            ui.add_enabled_ui(video.hevc, |ui| {
+                ui.checkbox(&mut video.hdr, "Request 10 bit HDR from the PS5")
+                    .on_hover_text("Less banding in skies and dark scenes. The app tone maps it for this window and Discord.");
+            });
+            ui.end_row();
             ui.label("Decoding");
             ui.checkbox(&mut video.hardware_decoding, "Hardware (GPU, D3D11VA)");
             ui.end_row();
+        });
+    ui.add_space(6.0);
+    ui.label(RichText::new("Enhance").strong());
+    egui::Grid::new("enhance-grid")
+        .num_columns(2)
+        .spacing([16.0, 10.0])
+        .show(ui, |ui| {
             ui.label("Upscaling");
             egui::ComboBox::from_id_salt("upscaling")
                 .selected_text(video.upscaling.label())
@@ -187,11 +200,19 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
                     }
                 });
             ui.end_row();
-            if video.upscaling != Upscaling::Off {
-                ui.label("FSR sharpness");
-                ui.add(egui::Slider::new(&mut video.sharpness, 0.0..=1.0).show_value(false));
-                ui.end_row();
-            }
+            ui.label("Sharpening");
+            ui.add(percent_slider(&mut video.sharpness));
+            ui.end_row();
+            ui.label("Deband");
+            ui.add(percent_slider(&mut video.deband))
+                .on_hover_text("Smooths the color steps that compression leaves in gradients");
+            ui.end_row();
+            ui.label("Color edges");
+            ui.checkbox(
+                &mut video.better_chroma,
+                "Sharper color edges (luma guided chroma)",
+            );
+            ui.end_row();
         });
     if *video != before {
         app.mark_dirty();
@@ -200,11 +221,11 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
     info_box(
         ui,
         theme::MUTED,
-        "Remote Play streams up to 1080p at 60 FPS in SDR. Changes apply on the next connection.",
+        "Remote Play streams up to 1080p at 60 FPS. Codec, HDR and bitrate apply on the next connection; enhance settings apply right away.",
     );
     if app.config.video.upscaling != Upscaling::Off {
         let text = if app.config.video.upscaling == Upscaling::Auto && app.rtx_possible {
-            "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor).              RTX Video Super Resolution needs an RTX GPU with RTX video enhancement > Super resolution turned on in the NVIDIA Control Panel              (Video > Adjust video image settings). Without it the image is only resized."
+            "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor).              RTX Video Super Resolution needs RTX video enhancement > Super resolution turned on in the NVIDIA Control Panel              (Video > Adjust video image settings). Without it the image is only resized."
         } else {
             "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor)."
         };
@@ -214,6 +235,16 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
         app.stream.disconnect();
         app.connect_selected();
     }
+}
+
+fn percent_slider(value: &mut f32) -> egui::Slider<'_> {
+    egui::Slider::new(value, 0.0..=1.0).custom_formatter(|v, _| {
+        if v < 0.01 {
+            "Off".into()
+        } else {
+            format!("{:.0}%", v * 100.0)
+        }
+    })
 }
 
 pub fn audio_controls(ui: &mut Ui, app: &mut App) {

@@ -70,6 +70,7 @@ PSLC_API void pslc_regist_free(PslcRegist *regist);
 
 #define PSLC_CODEC_H264 0
 #define PSLC_CODEC_H265 1
+#define PSLC_CODEC_H265_HDR 2
 
 typedef struct PslcSessionConfig
 {
@@ -146,6 +147,7 @@ typedef struct PslcFrameInfo
 	uint32_t height;
 	int format;
 	int hw;
+	int hdr; // 1 when the frame uses the PQ (SMPTE ST 2084) transfer, BT.2020 primaries
 	uint64_t sequence;
 } PslcFrameInfo;
 

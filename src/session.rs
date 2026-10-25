@@ -268,6 +268,7 @@ impl StreamController {
             fps: video.fps,
             bitrate: video.bitrate_kbps,
             hevc: video.hevc && target.console.is_ps5,
+            hdr: video.hdr,
             prefer_hw_decode: video.hardware_decoding,
             d3d11_device: device,
             packet_loss_max: 0.05,

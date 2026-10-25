@@ -58,6 +58,9 @@ pub struct VideoSettings {
     pub hardware_decoding: bool,
     pub upscaling: Upscaling,
     pub sharpness: f32,
+    pub hdr: bool,
+    pub deband: f32,
+    pub better_chroma: bool,
 }
 
 impl Default for VideoSettings {
@@ -69,7 +72,10 @@ impl Default for VideoSettings {
             hevc: true,
             hardware_decoding: true,
             upscaling: Upscaling::Auto,
-            sharpness: 0.8,
+            sharpness: 0.5,
+            hdr: false,
+            deband: 0.5,
+            better_chroma: true,
         }
     }
 }
@@ -277,6 +283,7 @@ impl AppConfig {
         }
         self.video.bitrate_kbps = self.video.bitrate_kbps.clamp(2_000, 40_000);
         self.video.sharpness = self.video.sharpness.clamp(0.0, 1.0);
+        self.video.deband = self.video.deband.clamp(0.0, 1.0);
     }
 
     pub fn console(&self, host_id: &str) -> Option<&ConsoleEntry> {

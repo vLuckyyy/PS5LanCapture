@@ -21,6 +21,8 @@ The official PS Remote Play app was laggy and the picture quality was bad. So I 
 
 - Up to 1080p at 60 FPS, H.265 hardware decoding on the GPU (Direct3D 11)
 - Upscaling for big windows and fullscreen on 1440p/4K monitors: NVIDIA RTX Video Super Resolution, with AMD FSR 1 on other GPUs
+- Enhance: debanding for compressed gradients, sharper color edges (luma guided chroma upsampling), adjustable sharpening
+- Optional 10 bit HDR stream from the PS5, tone mapped for the window and Discord (less banding in skies and dark scenes)
 - Game audio through any Windows output device, with volume, mute and buffer settings
 - DualSense over USB or Bluetooth: buttons, sticks, triggers, touchpad, gyro
 - Rumble, adaptive triggers and lightbar color from the console
@@ -49,7 +51,7 @@ Then follow the setup wizard.
 
 ## Sharper picture on big screens
 
-The PS5 sends at most 1080p. When the video on screen is bigger (fullscreen on a 1440p or 4K monitor), the app upscales it. On NVIDIA RTX cards it uses RTX Video Super Resolution: turn on **RTX video enhancement > Super resolution** in NVIDIA Control Panel (Video > Adjust video image settings). Other GPUs use AMD FSR 1. You can change this in Settings > Video.
+The PS5 sends at most 1080p. When the video on screen is bigger (fullscreen on a 1440p or 4K monitor), the app upscales it. On NVIDIA RTX cards it uses RTX Video Super Resolution: turn on **RTX video enhancement > Super resolution** in NVIDIA Control Panel (Video > Adjust video image settings). Other GPUs use AMD FSR 1. Debanding, color edge reconstruction, sharpening and the HDR stream are in Settings > Video > Enhance.
 
 ## Sharing on Discord
 

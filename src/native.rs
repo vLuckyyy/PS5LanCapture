@@ -51,6 +51,7 @@ pub struct RawFrameInfo {
     pub height: u32,
     pub format: c_int,
     pub hw: c_int,
+    pub hdr: c_int,
     pub sequence: u64,
 }
 
@@ -403,6 +404,7 @@ pub struct SessionParams {
     pub fps: u32,
     pub bitrate: u32,
     pub hevc: bool,
+    pub hdr: bool,
     pub prefer_hw_decode: bool,
     pub d3d11_device: *mut c_void,
     pub packet_loss_max: f64,
@@ -496,7 +498,11 @@ impl Session {
             height: params.height,
             fps: params.fps,
             bitrate: params.bitrate,
-            codec: params.hevc as c_int,
+            codec: if params.hevc && params.hdr {
+                2
+            } else {
+                params.hevc as c_int
+            },
             prefer_hw_decode: params.prefer_hw_decode as c_int,
             d3d11_device: params.d3d11_device,
             packet_loss_max: params.packet_loss_max,
