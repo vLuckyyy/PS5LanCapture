@@ -194,6 +194,13 @@ impl Runner {
                     render::Enhance {
                         better_chroma: self.app.config.video.better_chroma,
                         deband: self.app.config.video.deband,
+                        clarity: self.app.config.video.clarity,
+                        grade: self
+                            .app
+                            .config
+                            .video
+                            .look
+                            .grade(self.app.config.video.custom_grade),
                     },
                 );
             }
@@ -212,6 +219,7 @@ impl Runner {
                 source: v.source,
                 scaler: v.scaler,
                 hdr: v.hdr,
+                pixel_perfect: settings.upscaling == config::Upscaling::PixelPerfect,
             });
         self.app.rtx_possible = renderer.rtx_possible();
 

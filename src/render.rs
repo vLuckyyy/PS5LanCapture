@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::core::{Interface, PCSTR, s};
 
-use crate::config::Upscaling;
+use crate::config::{ColorGrade, Upscaling};
 use crate::native;
 use crate::upscale::{ScalerKind, Upscaler};
 
@@ -117,7 +117,8 @@ float4 ps_main(float4 pos : SV_Position) : SV_Target {
 "#;
 
 // Debanding (several rounds of random 4 tap averages that only replace a pixel when it is within
-// the threshold of its surroundings, so real edges survive), light grain, and dithering to 8 bits.
+// the threshold of its surroundings, so real edges survive), clarity (local contrast on luma,
+// strongest in midtones), color grading, light grain, and dithering to 8 bits.
 const FINISH_SHADER: &str = r#"
 Texture2D<float4> source_tex : register(t0);
 SamplerState linear_sampler : register(s0);
@@ -125,12 +126,58 @@ cbuffer Params : register(b0) {
     float threshold;
     float grain;
     float2 texel;
+    float clarity;
+    float saturation;
+    float vibrance;
+    float contrast;
+    float gamma;
+    float warmth;
+    float radius;
+    float unused;
 };
+
+static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
 
 float hash(float2 p) {
     float3 p3 = frac(float3(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
     return frac((p3.x + p3.y) * p3.z);
+}
+
+float3 with_luma(float3 c, float from, float to) {
+    return c * (max(to, 0.0) / max(from, 1e-4));
+}
+
+float local_mean(float2 uv) {
+    float sum = 0.0;
+    [unroll] for (int i = 0; i < 8; i++) {
+        float a = i * 0.7853982 + 0.3926991;
+        float2 d = float2(cos(a), sin(a)) * texel * radius;
+        sum += dot(source_tex.SampleLevel(linear_sampler, uv + d, 0).rgb, LUMA);
+        sum += dot(source_tex.SampleLevel(linear_sampler, uv + d * 2.5, 0).rgb, LUMA);
+    }
+    return sum / 16.0;
+}
+
+float3 grade(float3 c) {
+    c = saturate(c);
+    float y = dot(c, LUMA);
+    float curved = y + contrast * (y - 0.5) * 4.0 * y * (1.0 - y);
+    c = with_luma(c, y, curved);
+    y = curved;
+    c = y + (c - y) * saturation;
+    float hi = max(c.r, max(c.g, c.b));
+    float lo = min(c.r, min(c.g, c.b));
+    float chroma = hi - lo;
+    float skin = 0.0;
+    if (c.r >= c.g && c.g >= c.b && chroma > 1e-4) {
+        float hue = 60.0 * (c.g - c.b) / chroma;
+        skin = exp(-pow((hue - 25.0) / 14.0, 2.0));
+    }
+    float boost = vibrance * (1.0 - chroma / max(hi, 1e-4)) * (1.0 - 0.8 * skin);
+    c = y + (c - y) * (1.0 + boost);
+    c *= float3(1.0 + warmth * 0.05, 1.0, 1.0 - warmth * 0.05);
+    return pow(saturate(c), gamma);
 }
 
 float4 ps_main(float4 pos : SV_Position) : SV_Target {
@@ -149,6 +196,14 @@ float4 ps_main(float4 pos : SV_Position) : SV_Target {
             float3 keep = step(threshold / i, abs(c - avg));
             c = lerp(avg, c, keep);
         }
+    }
+    if (clarity > 0.0) {
+        float y = saturate(dot(c, LUMA));
+        float detail = clamp(y - local_mean(uv), -0.06, 0.06);
+        c = with_luma(c, y, y + clarity * detail * 4.0 * y * (1.0 - y));
+    }
+    c = grade(c);
+    if (threshold > 0.0) {
         c += (hash(pos.xy * 0.731 + 3.0) - 0.5) * grain;
     }
     c += (hash(pos.xy + 0.5) + hash(pos.xy * 1.31 + 9.0) - 1.0) / 255.0;
@@ -160,6 +215,8 @@ float4 ps_main(float4 pos : SV_Position) : SV_Target {
 pub struct Enhance {
     pub better_chroma: bool,
     pub deband: f32,
+    pub clarity: f32,
+    pub grade: ColorGrade,
 }
 
 pub(crate) struct RenderTexture {
@@ -370,14 +427,28 @@ pub(crate) fn convert_constants(
     con
 }
 
-pub(crate) fn finish_constants(deband: f32, size: (u32, u32)) -> [u32; 16] {
-    let strength = deband.clamp(0.0, 1.0);
-    let mut con = [0u32; 16];
-    con[0] = (strength * 3.0 / 255.0).to_bits();
-    con[1] = (strength * 1.5 / 255.0).to_bits();
-    con[2] = (1.0 / size.0 as f32).to_bits();
-    con[3] = (1.0 / size.1 as f32).to_bits();
-    con
+pub(crate) fn finish_constants(enhance: &Enhance, size: (u32, u32)) -> [u32; 16] {
+    let strength = enhance.deband.clamp(0.0, 1.0);
+    let grade = enhance.grade.clamped();
+    [
+        strength * 3.0 / 255.0,
+        strength * 1.5 / 255.0,
+        1.0 / size.0 as f32,
+        1.0 / size.1 as f32,
+        enhance.clarity.clamp(0.0, 1.0),
+        grade.saturation,
+        grade.vibrance,
+        grade.contrast,
+        grade.gamma,
+        grade.warmth,
+        4.0 * size.1 as f32 / 1080.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
+    .map(f32::to_bits)
 }
 
 /// Decoded YUV frame to the 8 bit RGB texture that everything after it works on:
@@ -419,7 +490,7 @@ impl VideoPipeline {
         self.passes.draw(
             context,
             &self.finish_shader,
-            &finish_constants(enhance.deband, linear.size()),
+            &finish_constants(&enhance, linear.size()),
             &[Some(linear.srv.clone())],
             rgb,
         );

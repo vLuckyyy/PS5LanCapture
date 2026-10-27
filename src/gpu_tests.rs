@@ -6,6 +6,7 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
 use crate::config::Upscaling;
+use crate::config::{ColorGrade, ColorLook};
 use crate::render::{Enhance, RenderTexture, VideoPipeline};
 use crate::upscale::{ScalerKind, Upscaler};
 
@@ -172,6 +173,15 @@ fn sdr_frame() -> Vec<u8> {
     data
 }
 
+fn flat_frame(luma: u8, cb: u8, cr: u8) -> Vec<u8> {
+    let (w, h) = (W as usize, H as usize);
+    let mut data = vec![luma; w * h * 3 / 2];
+    for pair in data[w * h..].as_chunks_mut::<2>().0 {
+        *pair = [cb, cr];
+    }
+    data
+}
+
 fn pq_encode(nits: f32) -> f32 {
     let (m1, m2, c1, c2, c3) = (0.159_301_76, 78.843_75, 0.835_937_5, 18.851_563, 18.687_5);
     let y = (nits / 10000.0).powf(m1);
@@ -278,10 +288,13 @@ fn enhance_pipeline_on_gpu() {
     let plain = Enhance {
         better_chroma: false,
         deband: 0.0,
+        clarity: 0.0,
+        grade: ColorGrade::default(),
     };
     let full = Enhance {
         better_chroma: true,
         deband: 1.0,
+        ..plain
     };
 
     let sdr = upload_yuv(&device, &sdr_frame(), false);
@@ -299,6 +312,105 @@ fn enhance_pipeline_on_gpu() {
     assert!(
         jump_after < jump_before * 0.7,
         "deband did not smooth the gradient"
+    );
+
+    let lower = |img: &(u32, u32, Vec<u8>)| {
+        let start = (H / 2 * W * 4) as usize;
+        let pixels: Vec<[f32; 3]> = img.2[start..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| [p[0] as f32, p[1] as f32, p[2] as f32])
+            .collect();
+        let n = pixels.len() as f32;
+        let luma: Vec<f32> = pixels
+            .iter()
+            .map(|p| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2])
+            .collect();
+        let mean = luma.iter().sum::<f32>() / n;
+        let spread = (luma.iter().map(|y| (y - mean).powi(2)).sum::<f32>() / n).sqrt();
+        let chroma = pixels
+            .iter()
+            .map(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]))
+            .sum::<f32>()
+            / n;
+        let warmth = pixels.iter().map(|p| p[0] - p[2]).sum::<f32>() / n;
+        (mean, spread, chroma, warmth)
+    };
+    let faded = |img: &(u32, u32, Vec<u8>)| {
+        let end = (H / 2 * W * 4) as usize;
+        let pixels = img.2[..end].as_chunks::<4>().0;
+        pixels
+            .iter()
+            .map(|p| {
+                let hi = p[0].max(p[1]).max(p[2]) as f32;
+                let lo = p[0].min(p[1]).min(p[2]) as f32;
+                (hi - lo) / hi.max(1.0)
+            })
+            .sum::<f32>()
+            / pixels.len() as f32
+    };
+    let natural = lower(&before);
+    let vivid = Enhance {
+        grade: ColorLook::Vivid.grade(ColorGrade::default()),
+        ..plain
+    };
+    let mut boosts = Vec::new();
+    for (name, cb, cr) in [("pastel teal", 140u8, 116u8), ("skin", 108, 150)] {
+        let flat = upload_yuv(&device, &flat_frame(150, cb, cr), false);
+        let (_, base) = run(&device, &context, &pipeline, &flat, false, plain);
+        let (_, graded) = run(&device, &context, &pipeline, &flat, false, vivid);
+        let boost = faded(&graded) / faded(&base);
+        println!("vivid on {name}: saturation x{boost:.2}");
+        boosts.push(boost);
+    }
+    assert!(boosts[0] > 1.1, "vivid did not enrich faded colors");
+    assert!(boosts[1] < boosts[0], "vivid does not protect skin tones");
+    let looks = [
+        (
+            "look-clarity.png",
+            Enhance {
+                clarity: 1.0,
+                ..plain
+            },
+        ),
+        (
+            "look-vivid.png",
+            Enhance {
+                grade: ColorLook::Vivid.grade(ColorGrade::default()),
+                ..plain
+            },
+        ),
+        (
+            "look-cinema.png",
+            Enhance {
+                grade: ColorLook::Cinema.grade(ColorGrade::default()),
+                ..plain
+            },
+        ),
+    ];
+    let mut measured = Vec::new();
+    for (name, enhance) in looks {
+        let (_, image) = run(&device, &context, &pipeline, &sdr, false, enhance);
+        save(name, &image);
+        let stats = lower(&image);
+        println!(
+            "{name}: mean {:.1}, spread {:.1}, chroma {:.1}, warmth {:.1}",
+            stats.0, stats.1, stats.2, stats.3
+        );
+        measured.push(stats);
+    }
+    println!(
+        "natural: mean {:.1}, spread {:.1}, chroma {:.1}, warmth {:.1}",
+        natural.0, natural.1, natural.2, natural.3
+    );
+    assert!(
+        measured[0].1 > natural.1 * 1.05,
+        "clarity did not add local contrast"
+    );
+    assert!(
+        measured[2].0 < natural.0 && measured[2].3 > natural.3,
+        "cinema is not darker and warmer"
     );
 
     let hdr = upload_yuv(&device, &hdr_frame(), true);
@@ -332,6 +444,34 @@ fn enhance_pipeline_on_gpu() {
         }
         let image = read_back(&device, &context, &upscaler.output_texture().unwrap());
         save(name, &image);
+    }
+
+    let mut upscaler = Upscaler::new(&device, &context);
+    let scaled = upscaler
+        .process(
+            &mut egui,
+            Upscaling::PixelPerfect,
+            0.6,
+            1,
+            &rgb,
+            Some([3900, 2200]),
+        )
+        .expect("pixel perfect output");
+    assert_eq!(
+        (scaled.kind, scaled.size),
+        (ScalerKind::PixelPerfect, [3840, 2160])
+    );
+    let blocks = read_back(&device, &context, &upscaler.output_texture().unwrap());
+    save("pixel-perfect-4k.png", &blocks);
+    let at = |x: u32, y: u32| {
+        &blocks.2[((y * 3840 + x) * 4) as usize..((y * 3840 + x) * 4 + 3) as usize]
+    };
+    for (x, y) in [(0, 0), (640, 200), (1200, 900), (1918, 1078)] {
+        assert_eq!(
+            at(x * 2, y * 2),
+            at(x * 2 + 1, y * 2 + 1),
+            "block at {x},{y} is not uniform"
+        );
     }
 
     let out = RenderTexture::new(&device, 3840, 2160, DXGI_FORMAT_B8G8R8A8_UNORM).unwrap();

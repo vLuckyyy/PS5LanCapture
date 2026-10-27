@@ -23,6 +23,7 @@ pub struct VideoView {
     pub source: [u32; 2],
     pub scaler: Option<crate::upscale::ScalerKind>,
     pub hdr: bool,
+    pub pixel_perfect: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

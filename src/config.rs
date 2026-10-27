@@ -50,6 +50,7 @@ pub enum Upscaling {
     Off,
     Auto,
     Fsr,
+    PixelPerfect,
 }
 
 impl Upscaling {
@@ -58,6 +59,97 @@ impl Upscaling {
             Upscaling::Off => "Off",
             Upscaling::Auto => "RTX Video Super Resolution (FSR fallback)",
             Upscaling::Fsr => "AMD FSR 1",
+            Upscaling::PixelPerfect => "Pixel perfect (2x, 3x)",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorGrade {
+    pub saturation: f32,
+    pub vibrance: f32,
+    pub contrast: f32,
+    pub gamma: f32,
+    pub warmth: f32,
+}
+
+impl Default for ColorGrade {
+    fn default() -> Self {
+        Self {
+            saturation: 1.0,
+            vibrance: 0.0,
+            contrast: 0.0,
+            gamma: 1.0,
+            warmth: 0.0,
+        }
+    }
+}
+
+impl ColorGrade {
+    pub fn clamped(self) -> Self {
+        Self {
+            saturation: self.saturation.clamp(0.0, 2.0),
+            vibrance: self.vibrance.clamp(-1.0, 1.0),
+            contrast: self.contrast.clamp(-0.5, 0.5),
+            gamma: self.gamma.clamp(0.7, 1.4),
+            warmth: self.warmth.clamp(-1.0, 1.0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorLook {
+    Natural,
+    Vivid,
+    Cinema,
+    Custom,
+}
+
+impl ColorLook {
+    pub const ALL: [ColorLook; 4] = [
+        ColorLook::Natural,
+        ColorLook::Vivid,
+        ColorLook::Cinema,
+        ColorLook::Custom,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ColorLook::Natural => "Natural",
+            ColorLook::Vivid => "Vivid",
+            ColorLook::Cinema => "Cinema",
+            ColorLook::Custom => "Custom",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            ColorLook::Natural => "Colors as the console sends them",
+            ColorLook::Vivid => {
+                "Richer faded colors and a bit more contrast, skin tones stay natural"
+            }
+            ColorLook::Cinema => "Warmer white, gamma 2.4 and deeper shadows for a dark room",
+            ColorLook::Custom => "Your own values",
+        }
+    }
+
+    pub fn grade(self, custom: ColorGrade) -> ColorGrade {
+        match self {
+            ColorLook::Natural => ColorGrade::default(),
+            ColorLook::Vivid => ColorGrade {
+                vibrance: 0.35,
+                contrast: 0.15,
+                ..ColorGrade::default()
+            },
+            ColorLook::Cinema => ColorGrade {
+                saturation: 0.95,
+                vibrance: 0.1,
+                contrast: 0.1,
+                gamma: 2.4 / 2.2,
+                warmth: 0.35,
+            },
+            ColorLook::Custom => custom.clamped(),
         }
     }
 }
@@ -75,6 +167,9 @@ pub struct VideoSettings {
     pub hdr: bool,
     pub deband: f32,
     pub better_chroma: bool,
+    pub clarity: f32,
+    pub look: ColorLook,
+    pub custom_grade: ColorGrade,
 }
 
 impl Default for VideoSettings {
@@ -90,6 +185,9 @@ impl Default for VideoSettings {
             hdr: false,
             deband: 0.5,
             better_chroma: true,
+            clarity: 0.0,
+            look: ColorLook::Natural,
+            custom_grade: ColorGrade::default(),
         }
     }
 }
@@ -360,6 +458,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn natural_look_is_neutral_and_custom_is_clamped() {
+        assert_eq!(
+            ColorLook::Natural.grade(ColorGrade::default()),
+            ColorGrade::default()
+        );
+        let wild = ColorGrade {
+            saturation: 9.0,
+            vibrance: -4.0,
+            contrast: 3.0,
+            gamma: 0.1,
+            warmth: 2.0,
+        };
+        let grade = ColorLook::Custom.grade(wild);
+        assert_eq!(grade.saturation, 2.0);
+        assert_eq!(grade.contrast, 0.5);
+        assert_eq!(grade.gamma, 0.7);
+        assert_eq!(ColorLook::Vivid.grade(wild).saturation, 1.0);
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub enum ScalerKind {
     RtxVsr,
     Fsr,
     Sharpen,
+    PixelPerfect,
 }
 
 impl ScalerKind {
@@ -39,6 +40,7 @@ impl ScalerKind {
             ScalerKind::RtxVsr => "RTX Video Super Resolution",
             ScalerKind::Fsr => "AMD FSR 1",
             ScalerKind::Sharpen => "sharpening only",
+            ScalerKind::PixelPerfect => "pixel perfect",
         }
     }
 
@@ -47,6 +49,7 @@ impl ScalerKind {
             ScalerKind::RtxVsr => "RTX VSR",
             ScalerKind::Fsr => "FSR 1",
             ScalerKind::Sharpen => "Sharpen",
+            ScalerKind::PixelPerfect => "Pixel perfect",
         }
     }
 }
@@ -106,6 +109,26 @@ pub fn plan_output(source: (u32, u32), target: [u32; 2]) -> Option<(u32, u32)> {
     Some((even(sw * scale), even(sh * scale)))
 }
 
+const POINT_SHADER: &str = r#"
+Texture2D<float4> source_tex : register(t0);
+cbuffer Params : register(b0) {
+    uint factor;
+};
+
+float4 ps_main(float4 pos : SV_Position) : SV_Target {
+    return source_tex.Load(int3(int2(pos.xy) / factor, 0));
+}
+"#;
+
+/// Largest whole multiple of the source (2x or more) that fits `target`, capped at 4K.
+pub fn plan_integer(source: (u32, u32), target: [u32; 2]) -> Option<(u32, u32)> {
+    let factor = (target[0] / source.0.max(1))
+        .min(target[1] / source.1.max(1))
+        .min(MAX_OUTPUT.0 / source.0.max(1))
+        .min(MAX_OUTPUT.1 / source.1.max(1));
+    (factor >= 2).then(|| (source.0 * factor, source.1 * factor))
+}
+
 fn fsr_shader(easu: bool) -> String {
     let (define, callbacks, entry) = if easu {
         (
@@ -153,6 +176,7 @@ struct Fsr {
     passes: Passes,
     easu: ID3D11PixelShader,
     rcas: ID3D11PixelShader,
+    point: ID3D11PixelShader,
 }
 
 impl Fsr {
@@ -161,6 +185,7 @@ impl Fsr {
             passes: Passes::new(device)?,
             easu: create_pixel_shader(device, &fsr_shader(true))?,
             rcas: create_pixel_shader(device, &fsr_shader(false))?,
+            point: create_pixel_shader(device, POINT_SHADER)?,
         })
     }
 }
@@ -464,8 +489,13 @@ impl Upscaler {
         source: &RenderTexture,
         target: Option<[u32; 2]>,
     ) -> Option<Scaled> {
+        if mode == Upscaling::PixelPerfect
+            && let Some(size) = target.and_then(|t| plan_integer(source.size(), t))
+        {
+            return self.pixel_perfect(egui, generation, source, size);
+        }
         let scale = match (mode, target) {
-            (Upscaling::Off, _) | (_, None) => None,
+            (Upscaling::Off | Upscaling::PixelPerfect, _) | (_, None) => None,
             (_, Some(target)) => plan_output(source.size(), target),
         };
         let sharpen = sharpness >= MIN_SHARPNESS;
@@ -561,6 +591,55 @@ impl Upscaler {
         Some(scaled)
     }
 
+    fn pixel_perfect(
+        &mut self,
+        egui: &mut egui_directx11::Renderer,
+        generation: u64,
+        source: &RenderTexture,
+        size: (u32, u32),
+    ) -> Option<Scaled> {
+        let kind = ScalerKind::PixelPerfect;
+        let key = (generation, size, kind, 0);
+        if self.last == Some(key)
+            && let Some(active) = self.active
+        {
+            return Some(active);
+        }
+        let texture_id = self.ensure_output(egui, size)?;
+        if !self.ensure_fsr() {
+            self.reset(egui);
+            return None;
+        }
+        let fsr = self.fsr.as_ref().unwrap();
+        let mut constants = [0u32; 16];
+        constants[0] = size.0 / source.width;
+        fsr.passes.draw(
+            &self.context,
+            &fsr.point,
+            &constants,
+            &[Some(source.srv.clone())],
+            &self.output.as_ref().unwrap().0,
+        );
+        if self.active.map(|a| (a.kind, a.size)) != Some((kind, [size.0, size.1])) {
+            log::info!(
+                "Video output {}x{} -> {}x{}: pixel perfect {}x",
+                source.width,
+                source.height,
+                size.0,
+                size.1,
+                constants[0]
+            );
+        }
+        let scaled = Scaled {
+            texture_id,
+            size: [size.0, size.1],
+            kind,
+        };
+        self.last = Some(key);
+        self.active = Some(scaled);
+        Some(scaled)
+    }
+
     fn run_rtx(&mut self, source: &RenderTexture, to_intermediate: bool) -> Result<(), String> {
         let destination = if to_intermediate {
             self.intermediate.as_ref().unwrap()
@@ -596,6 +675,15 @@ mod tests {
         assert_eq!(plan_output((1920, 1080), [2560, 1600]), Some((2560, 1440)));
         assert_eq!(plan_output((1920, 1080), [7680, 4320]), Some((3840, 2160)));
         assert_eq!(plan_output((1280, 720), [1920, 1080]), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn integer_scale_needs_whole_multiples() {
+        assert_eq!(plan_integer((1920, 1080), [3840, 2160]), Some((3840, 2160)));
+        assert_eq!(plan_integer((1920, 1080), [3800, 2160]), None);
+        assert_eq!(plan_integer((1280, 720), [3840, 2160]), Some((3840, 2160)));
+        assert_eq!(plan_integer((1280, 720), [7680, 4320]), Some((3840, 2160)));
+        assert_eq!(plan_integer((1280, 720), [2600, 1500]), Some((2560, 1440)));
     }
 
     #[test]

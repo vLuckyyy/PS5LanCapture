@@ -88,7 +88,8 @@ pub fn video_area(ui: &mut Ui, rect: Rect, video: Option<&VideoView>) -> Respons
         ui.ctx()
             .data_mut(|d| d.insert_temp(egui::Id::new(VIDEO_TARGET_ID), physical));
         let exact = vec2(video.size[0] as f32, video.size[1] as f32) / ppp;
-        if (exact - size).abs().max_elem() < 3.0 {
+        let fits = exact.x <= rect.width() + 0.5 && exact.y <= rect.height() + 0.5;
+        if (exact - size).abs().max_elem() < 3.0 || (video.pixel_perfect && fits) {
             size = exact;
         }
         let mut target = Rect::from_center_size(rect.center(), size);

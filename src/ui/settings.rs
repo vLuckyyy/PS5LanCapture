@@ -4,7 +4,7 @@ use super::widgets::info_box;
 use super::wizard::{Step, Wizard};
 use super::{App, theme};
 use crate::audio;
-use crate::config::{Resolution, Upscaling};
+use crate::config::{ColorLook, Resolution, Upscaling};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Tab {
@@ -200,7 +200,12 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             egui::ComboBox::from_id_salt("upscaling")
                 .selected_text(video.upscaling.label())
                 .show_ui(ui, |ui| {
-                    for mode in [Upscaling::Auto, Upscaling::Fsr, Upscaling::Off] {
+                    for mode in [
+                        Upscaling::Auto,
+                        Upscaling::Fsr,
+                        Upscaling::PixelPerfect,
+                        Upscaling::Off,
+                    ] {
                         ui.selectable_value(&mut video.upscaling, mode, mode.label());
                     }
                 });
@@ -219,6 +224,59 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             );
             ui.end_row();
         });
+    ui.add_space(6.0);
+    ui.label(RichText::new("Look").strong());
+    egui::Grid::new("look-grid")
+        .num_columns(2)
+        .spacing([16.0, 10.0])
+        .show(ui, |ui| {
+            ui.label("Clarity");
+            ui.add(percent_slider(&mut video.clarity)).on_hover_text(
+                "Local contrast: adds depth to textures without blowing out highlights",
+            );
+            ui.end_row();
+            ui.label("Colors");
+            ui.horizontal(|ui| {
+                for look in ColorLook::ALL {
+                    ui.selectable_value(&mut video.look, look, look.label())
+                        .on_hover_text(look.description());
+                }
+            });
+            ui.end_row();
+            if video.look == ColorLook::Custom {
+                let grade = &mut video.custom_grade;
+                ui.label("Saturation");
+                ui.add(
+                    egui::Slider::new(&mut grade.saturation, 0.0..=2.0)
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                );
+                ui.end_row();
+                ui.label("Vibrance");
+                ui.add(signed_slider(&mut grade.vibrance, 1.0))
+                    .on_hover_text(
+                        "Boosts faded colors more than vivid ones and leaves skin tones alone",
+                    );
+                ui.end_row();
+                ui.label("Contrast");
+                ui.add(signed_slider(&mut grade.contrast, 0.5));
+                ui.end_row();
+                ui.label("Gamma");
+                ui.add(
+                    egui::Slider::new(&mut grade.gamma, 0.7..=1.4)
+                        .custom_formatter(|v, _| format!("{:.2}", v * 2.2)),
+                )
+                .on_hover_text("2.2 is standard; higher gives deeper shadows");
+                ui.end_row();
+                ui.label("Warmth");
+                ui.add(signed_slider(&mut grade.warmth, 1.0));
+                ui.end_row();
+                ui.label("");
+                if ui.button("Reset").clicked() {
+                    *grade = Default::default();
+                }
+                ui.end_row();
+            }
+        });
     if *video != before {
         app.mark_dirty();
     }
@@ -236,10 +294,12 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
     info_box(
         ui,
         theme::MUTED,
-        "Remote Play officially streams up to 1080p at 60 FPS; 1440p and 2160p are experimental. Codec, HDR, resolution and bitrate apply on the next connection; enhance settings apply right away.",
+        "Remote Play officially streams up to 1080p at 60 FPS; 1440p and 2160p are experimental. Codec, HDR, resolution and bitrate apply on the next connection; enhance and look settings apply right away.",
     );
     if app.config.video.upscaling != Upscaling::Off {
-        let text = if app.config.video.upscaling == Upscaling::Auto && app.rtx_possible {
+        let text = if app.config.video.upscaling == Upscaling::PixelPerfect {
+            "Each stream pixel becomes an exact 2x2 or 3x3 block when the window is big enough (for example 1080p fullscreen on a 4K monitor). Otherwise the video is shown 1:1 with black borders."
+        } else if app.config.video.upscaling == Upscaling::Auto && app.rtx_possible {
             "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor). RTX Video Super Resolution needs RTX video enhancement > Super resolution turned on in the NVIDIA Control Panel (Video > Adjust video image settings). Without it the image is only resized."
         } else {
             "Upscaling kicks in when the video on screen is bigger than the stream (for example fullscreen on a 1440p or 4K monitor)."
@@ -250,6 +310,17 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
         app.stream.disconnect();
         app.connect_selected();
     }
+}
+
+fn signed_slider(value: &mut f32, range: f32) -> egui::Slider<'_> {
+    egui::Slider::new(value, -range..=range).custom_formatter(move |v, _| {
+        let percent = (v / range as f64 * 100.0).round();
+        if percent == 0.0 {
+            "0".into()
+        } else {
+            format!("{percent:+.0}%")
+        }
+    })
 }
 
 fn percent_slider(value: &mut f32) -> egui::Slider<'_> {
