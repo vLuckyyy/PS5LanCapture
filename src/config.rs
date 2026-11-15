@@ -187,6 +187,7 @@ pub struct VideoSettings {
     pub custom_grade: ColorGrade,
     pub display_sync: DisplaySync,
     pub hdr_output: bool,
+    pub rtx_hdr: bool,
 }
 
 impl Default for VideoSettings {
@@ -207,6 +208,7 @@ impl Default for VideoSettings {
             custom_grade: ColorGrade::default(),
             display_sync: DisplaySync::VSync,
             hdr_output: false,
+            rtx_hdr: true,
         }
     }
 }

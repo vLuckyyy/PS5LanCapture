@@ -147,6 +147,7 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
     let before = app.config.video.clone();
     let tearing_supported = app.tearing_supported;
     let display = app.display;
+    let rtx_possible = app.rtx_possible;
     let video = &mut app.config.video;
     egui::Grid::new("video-grid")
         .num_columns(2)
@@ -189,14 +190,17 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             });
             ui.end_row();
             ui.label("HDR display");
-            ui.add_enabled_ui(video.hevc && video.hdr && display.hdr, |ui| {
+            ui.add_enabled_ui(display.hdr, |ui| {
                 ui.checkbox(&mut video.hdr_output, "Show HDR on this display (HDR10)")
-                    .on_hover_text("The HDR stream goes to your monitor as real HDR10 instead of being tone mapped. Discord and other screen capture may show washed out colors while this is on.")
-                    .on_disabled_hover_text(if display.hdr {
-                        "Turn on the HDR stream first"
-                    } else {
-                        "HDR is off for this display in Windows (Settings > System > Display > Use HDR)"
-                    });
+                    .on_hover_text("An HDR stream goes to your monitor as real HDR10 instead of being tone mapped. Discord and other screen capture may show washed out colors while this is on.")
+                    .on_disabled_hover_text("HDR is off for this display in Windows (Settings > System > Display > Use HDR)");
+            });
+            ui.end_row();
+            ui.label("");
+            ui.add_enabled_ui(display.hdr && video.hdr_output && rtx_possible, |ui| {
+                ui.checkbox(&mut video.rtx_hdr, "RTX Video HDR for SDR streams")
+                    .on_hover_text("When the stream is SDR, the NVIDIA driver expands it to HDR up to your display's peak brightness.")
+                    .on_disabled_hover_text("Needs an NVIDIA RTX GPU and HDR output turned on");
             });
             ui.end_row();
             ui.label("Decoding");

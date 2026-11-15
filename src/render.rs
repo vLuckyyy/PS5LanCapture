@@ -16,7 +16,7 @@ use windows::core::{Interface, PCSTR, s};
 
 use crate::config::{ColorGrade, Upscaling};
 use crate::native;
-use crate::upscale::{ScalerKind, Upscaler};
+use crate::upscale::{HdrExpander, ScalerKind, Upscaler};
 
 const VERTEX_SHADER: &str = r#"
 float4 vs_main(uint id : SV_VertexID) : SV_Position {
@@ -739,6 +739,8 @@ pub struct Renderer {
     hdr_swap: bool,
     ui_layer: Option<RenderTexture>,
     present_srv: Option<ID3D11ShaderResourceView>,
+    hdr_expander: HdrExpander,
+    hdr_present: bool,
 }
 
 impl Renderer {
@@ -855,6 +857,8 @@ impl Renderer {
             hdr_swap: false,
             ui_layer: None,
             present_srv: None,
+            hdr_expander: HdrExpander::default(),
+            hdr_present: false,
         };
         log::info!(
             "Display: HDR {}, peak {:.0} nits",
@@ -1009,6 +1013,8 @@ impl Renderer {
 
     pub fn drop_video(&mut self) {
         self.present_srv = None;
+        self.hdr_present = false;
+        self.hdr_expander.reset();
         self.unpresented = None;
         self.latency.reset();
         self.upscaler.reset(&mut self.egui);
@@ -1189,12 +1195,16 @@ impl Renderer {
     }
 
     /// Picks the texture to show, upscaling and sharpening the frame when that is enabled.
+    ///
+    /// `sdr_to_hdr` asks for SDR streams to be expanded with RTX Video HDR on an HDR display.
     pub fn video_output(
         &mut self,
         mode: Upscaling,
         sharpness: f32,
         target: Option<[u32; 2]>,
+        sdr_to_hdr: bool,
     ) -> Option<VideoOutput> {
+        let expand = sdr_to_hdr && self.display().hdr && self.upscaler.rtx_possible();
         let video = self.video.as_ref().filter(|v| v.has_frame)?;
         let source = [video.width, video.height];
         let generation = video.processed.map(|p| p.0).unwrap_or(video.sequence);
@@ -1206,16 +1216,20 @@ impl Renderer {
             &video.rgb,
             target,
         );
-        self.present_srv = Some(match scaled {
-            Some(_) => self
-                .upscaler
-                .output_srv()
-                .unwrap_or_else(|| video.rgb.srv.clone()),
-            None => video.rgb.srv.clone(),
-        });
+        let shown = scaled
+            .and_then(|_| self.upscaler.output_target())
+            .unwrap_or(&video.rgb);
+        let expanded = if expand && !video.pq {
+            self.hdr_expander
+                .process(&self.device, &self.context, shown, generation)
+        } else {
+            None
+        };
+        self.hdr_present = video.pq || expanded.is_some();
+        self.present_srv = Some(expanded.unwrap_or_else(|| shown.srv.clone()));
         Some(match scaled {
             Some(s) => VideoOutput {
-                composited: video.pq,
+                composited: self.hdr_present,
                 texture_id: s.texture_id,
                 size: s.size,
                 source,
@@ -1223,7 +1237,7 @@ impl Renderer {
                 hdr: video.hdr,
             },
             None => VideoOutput {
-                composited: video.pq,
+                composited: self.hdr_present,
                 texture_id: video.texture_id,
                 size: source,
                 source,
@@ -1290,7 +1304,7 @@ impl Renderer {
         immediate: bool,
         video_rect: Option<[f32; 4]>,
     ) -> Result<(), String> {
-        let composite = self.video.as_ref().is_some_and(|v| v.pq && v.has_frame);
+        let composite = self.hdr_present && self.video.as_ref().is_some_and(|v| v.has_frame);
         self.set_hdr_swap(composite);
         let Some(back_buffer) = self.back_buffer.clone() else {
             return Ok(());

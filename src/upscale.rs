@@ -19,6 +19,18 @@ const MIN_SHARPNESS: f32 = 0.01;
 // NVIDIA driver extension that turns on RTX Video Super Resolution for a D3D11 video processor
 // stream (same mechanism as used by mpv and VLC).
 const NVIDIA_PPE_INTERFACE: GUID = GUID::from_u128(0xd43ce1b3_1f4b_48ac_baee_c3c25375e6f7);
+// Same mechanism for RTX Video HDR, which expands an SDR stream to HDR10.
+const NVIDIA_TRUE_HDR_INTERFACE: GUID = GUID::from_u128(0xfdd62bb4_620b_4fd7_9ab3_1e59d0d544b3);
+
+/// What the NVIDIA driver should do on top of the plain video processor blit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RtxFeature {
+    #[cfg_attr(not(test), allow(dead_code))]
+    None,
+    SuperResolution,
+    VideoHdr,
+}
+
 #[repr(C)]
 struct NvidiaStreamExtension {
     version: u32,
@@ -203,7 +215,7 @@ fn create_rtx(
     context: &ID3D11DeviceContext,
     source: &RenderTexture,
     output: &RenderTexture,
-    enable_vsr: bool,
+    feature: RtxFeature,
 ) -> Result<RtxProcessor, String> {
     let video_device: ID3D11VideoDevice =
         device.cast().map_err(|e| format!("video device: {e}"))?;
@@ -286,23 +298,39 @@ fn create_rtx(
         video_context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&dest_rect));
         video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&dest_rect));
         video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-        let color_space = if source.format == DXGI_FORMAT_R10G10B10A2_UNORM {
-            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
-        } else {
-            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+        let color_space = |format: DXGI_FORMAT| {
+            if format == DXGI_FORMAT_R10G10B10A2_UNORM {
+                DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+            } else {
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+            }
         };
-        video_context.VideoProcessorSetStreamColorSpace1(&processor, 0, color_space);
-        video_context.VideoProcessorSetOutputColorSpace1(&processor, color_space);
-        if enable_vsr {
-            let extension = NvidiaStreamExtension {
-                version: 0x1,
-                method: 0x2,
-                enable: 1,
-            };
+        video_context.VideoProcessorSetStreamColorSpace1(&processor, 0, color_space(source.format));
+        video_context.VideoProcessorSetOutputColorSpace1(&processor, color_space(output.format));
+        let extension = match feature {
+            RtxFeature::None => None,
+            RtxFeature::SuperResolution => Some((
+                &NVIDIA_PPE_INTERFACE,
+                NvidiaStreamExtension {
+                    version: 0x1,
+                    method: 0x2,
+                    enable: 1,
+                },
+            )),
+            RtxFeature::VideoHdr => Some((
+                &NVIDIA_TRUE_HDR_INTERFACE,
+                NvidiaStreamExtension {
+                    version: 0x4,
+                    method: 0x3,
+                    enable: 1,
+                },
+            )),
+        };
+        if let Some((interface, extension)) = extension {
             let hr = video_context.VideoProcessorSetStreamExtension(
                 &processor,
                 0,
-                &NVIDIA_PPE_INTERFACE,
+                interface,
                 std::mem::size_of::<NvidiaStreamExtension>() as u32,
                 &extension as *const _ as *const _,
             );
@@ -354,10 +382,90 @@ pub fn run_video_processor_once(
     context: &ID3D11DeviceContext,
     source: &RenderTexture,
     output: &RenderTexture,
-    vsr: bool,
+    feature: RtxFeature,
 ) -> Result<(), String> {
-    let processor = create_rtx(device, context, source, output, vsr)?;
+    let processor = create_rtx(device, context, source, output, feature)?;
     run_video_processor(context, &processor)
+}
+
+/// RTX Video HDR: expands the finished SDR frame to HDR10 for an HDR display.
+#[derive(Default)]
+pub struct HdrExpander {
+    processor: Option<RtxProcessor>,
+    target: Option<RenderTexture>,
+    last: Option<(u64, usize)>,
+    failed: bool,
+}
+
+impl HdrExpander {
+    pub fn reset(&mut self) {
+        self.processor = None;
+        self.target = None;
+        self.last = None;
+    }
+
+    /// Returns the HDR10 version of `source`, or None when the driver cannot do it.
+    pub fn process(
+        &mut self,
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        source: &RenderTexture,
+        generation: u64,
+    ) -> Option<ID3D11ShaderResourceView> {
+        if self.failed {
+            return None;
+        }
+        if self
+            .target
+            .as_ref()
+            .is_none_or(|t| t.size() != source.size())
+        {
+            self.processor = None;
+            self.target = RenderTexture::new(
+                device,
+                source.width,
+                source.height,
+                DXGI_FORMAT_R10G10B10A2_UNORM,
+            )
+            .map_err(|e| log::warn!("RTX Video HDR target: {e}"))
+            .ok();
+        }
+        let target = self.target.as_ref()?;
+        let key = (generation, source.texture.as_raw() as usize);
+        if self.last == Some(key) {
+            return Some(target.srv.clone());
+        }
+        let processor_key = (key.1, target.texture.as_raw() as usize);
+        let result = (|| {
+            if self
+                .processor
+                .as_ref()
+                .is_none_or(|p| p.key != processor_key)
+            {
+                self.processor = Some(create_rtx(
+                    device,
+                    context,
+                    source,
+                    target,
+                    RtxFeature::VideoHdr,
+                )?);
+                log::info!("RTX Video HDR on, {}x{}", source.width, source.height);
+            }
+            run_video_processor(context, self.processor.as_ref().unwrap())
+        })();
+        match result {
+            Ok(()) => {
+                self.last = Some(key);
+                Some(target.srv.clone())
+            }
+            Err(e) => {
+                log::warn!("RTX Video HDR unavailable ({e})");
+                self.failed = true;
+                self.reset();
+                None
+            }
+        }
+    }
 }
 
 pub struct Upscaler {
@@ -402,8 +510,8 @@ impl Upscaler {
         self.output.as_ref().map(|(t, _)| t.texture.clone())
     }
 
-    pub fn output_srv(&self) -> Option<ID3D11ShaderResourceView> {
-        self.output.as_ref().map(|(t, _)| t.srv.clone())
+    pub(crate) fn output_target(&self) -> Option<&RenderTexture> {
+        self.output.as_ref().map(|(t, _)| t)
     }
 
     pub fn rtx_possible(&self) -> bool {
@@ -664,7 +772,7 @@ impl Upscaler {
                 &self.context,
                 source,
                 destination,
-                true,
+                RtxFeature::SuperResolution,
             )?);
         }
         run_video_processor(&self.context, self.rtx.as_ref().unwrap())

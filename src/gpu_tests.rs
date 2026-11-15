@@ -539,7 +539,12 @@ fn enhance_pipeline_on_gpu() {
     let out = RenderTexture::new(&device, 3840, 2160, DXGI_FORMAT_B8G8R8A8_UNORM).unwrap();
     let mut results = Vec::new();
     for vsr in [false, true] {
-        match crate::upscale::run_video_processor_once(&device, &context, &rgb, &out, vsr) {
+        let feature = if vsr {
+            crate::upscale::RtxFeature::SuperResolution
+        } else {
+            crate::upscale::RtxFeature::None
+        };
+        match crate::upscale::run_video_processor_once(&device, &context, &rgb, &out, feature) {
             Ok(()) => results.push(read_back(&device, &context, &out.texture)),
             Err(e) => {
                 println!("video processor (vsr={vsr}) failed: {e}");
@@ -707,7 +712,12 @@ fn hdr10_output_keeps_pq_and_fits_the_display() {
     let out = RenderTexture::new(&device, 3840, 2160, DXGI_FORMAT_R10G10B10A2_UNORM).unwrap();
     let mut passes = Vec::new();
     for vsr in [false, true] {
-        match crate::upscale::run_video_processor_once(&device, &context, &fitted, &out, vsr) {
+        let feature = if vsr {
+            crate::upscale::RtxFeature::SuperResolution
+        } else {
+            crate::upscale::RtxFeature::None
+        };
+        match crate::upscale::run_video_processor_once(&device, &context, &fitted, &out, feature) {
             Ok(()) => passes.push(read_back_10bit(&device, &context, &out.texture)),
             Err(e) => println!("video processor on HDR (vsr={vsr}) failed: {e}"),
         }
@@ -793,4 +803,73 @@ fn swap_chain_switches_to_hdr10_and_back() {
     unsafe {
         let _ = DestroyWindow(hwnd);
     }
+}
+
+#[test]
+#[ignore = "needs an NVIDIA RTX GPU; probes RTX Video HDR"]
+fn rtx_video_hdr_expands_sdr() {
+    use crate::upscale::{RtxFeature, run_video_processor_once};
+
+    let (device, context) = device();
+    let pipeline = VideoPipeline::new(&device).unwrap();
+    let plain = Enhance {
+        better_chroma: true,
+        deband: 0.0,
+        clarity: 0.0,
+        grade: ColorGrade::default(),
+    };
+    let out = RenderTexture::new(&device, W, H, DXGI_FORMAT_R10G10B10A2_UNORM).unwrap();
+    for luma in [235u8, 180, 126, 60] {
+        let flat = upload_yuv(&device, &flat_frame(luma, 128, 128), false);
+        let (gray, _) = run(&device, &context, &pipeline, &flat, false, plain);
+        if run_video_processor_once(&device, &context, &gray, &out, RtxFeature::VideoHdr).is_ok() {
+            let px = read_back_10bit(&device, &context, &out.texture)[(540 * W + 960) as usize];
+            let e = px[1] as f32 / 1023.0;
+            let p = e.powf(1.0 / 78.84375);
+            let nits = ((p - 0.8359375).max(0.0) / (18.851_562 - 18.6875 * p))
+                .powf(1.0 / 0.159_301_76)
+                * 10000.0;
+            println!(
+                "RTX Video HDR: SDR gray {luma} -> code {} = {nits:.0} nits",
+                px[1]
+            );
+        }
+    }
+    let sdr = upload_yuv(&device, &sdr_frame(), false);
+    let (rgb, _) = run(&device, &context, &pipeline, &sdr, false, plain);
+    let mut expander = crate::upscale::HdrExpander::default();
+    assert!(
+        expander.process(&device, &context, &rgb, 1).is_some(),
+        "the app's RTX Video HDR step did not produce a frame"
+    );
+    assert!(expander.process(&device, &context, &rgb, 2).is_some());
+    let mut results = Vec::new();
+    for feature in [RtxFeature::None, RtxFeature::VideoHdr] {
+        match run_video_processor_once(&device, &context, &rgb, &out, feature) {
+            Ok(()) => results.push(read_back_10bit(&device, &context, &out.texture)),
+            Err(e) => {
+                println!("RTX Video HDR probe: {feature:?} failed: {e}");
+                return;
+            }
+        }
+    }
+    let stats = |pixels: &[[u16; 3]]| {
+        let peak = pixels.iter().flatten().copied().max().unwrap_or(0);
+        let mean =
+            pixels.iter().flatten().map(|v| *v as f64).sum::<f64>() / (pixels.len() * 3) as f64;
+        (peak, mean)
+    };
+    let differing = results[0]
+        .iter()
+        .zip(&results[1])
+        .filter(|(a, b)| a.iter().zip(*b).any(|(x, y)| x.abs_diff(*y) > 8))
+        .count();
+    println!(
+        "plain SDR to PQ: peak {} mean {:.0}; RTX Video HDR: peak {} mean {:.0}; {:.1}% of pixels differ",
+        stats(&results[0]).0,
+        stats(&results[0]).1,
+        stats(&results[1]).0,
+        stats(&results[1]).1,
+        differing as f64 * 100.0 / results[0].len() as f64
+    );
 }

@@ -217,7 +217,12 @@ impl Runner {
             .data(|d| d.get_temp::<[u32; 2]>(egui::Id::new(ui::widgets::VIDEO_TARGET_ID)));
         let settings = &self.app.config.video;
         let video = renderer
-            .video_output(settings.upscaling, settings.sharpness, target)
+            .video_output(
+                settings.upscaling,
+                settings.sharpness,
+                target,
+                settings.hdr_output && settings.rtx_hdr && self.app.wizard.is_none(),
+            )
             .map(|v| VideoView {
                 texture_id: v.texture_id,
                 size: v.size,

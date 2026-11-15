@@ -333,7 +333,9 @@ fn stats_overlay(ui: &mut Ui, app: &App, rect: egui::Rect, video: Option<&VideoV
             ));
             ui.label(mono(format!(
                 "Range     {}",
-                if video.is_some_and(|v| v.composited) {
+                if video.is_some_and(|v| v.composited && !v.hdr) {
+                    "SDR to HDR10 (RTX Video HDR)"
+                } else if video.is_some_and(|v| v.composited) {
                     "HDR10"
                 } else if video.is_some_and(|v| v.hdr) {
                     "HDR10, tone mapped"
