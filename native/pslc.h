@@ -93,6 +93,8 @@ typedef struct PslcSessionConfig
 #define PSLC_EVENT_LOGIN_PIN_REQUEST 3
 #define PSLC_EVENT_NICKNAME 4
 #define PSLC_EVENT_DECODER 5
+// A new decoded frame is ready for pslc_session_copy_frame; sent from the video thread.
+#define PSLC_EVENT_FRAME 6
 
 // For PSLC_EVENT_QUIT, code is the ChiakiQuitReason and is_error says whether it was abnormal.
 typedef void (*PslcEventCb)(int type, int code, int is_error, const char *msg, void *user);
@@ -155,7 +157,17 @@ PSLC_API int pslc_session_frame_info(PslcSession *session, PslcFrameInfo *out);
 // Copies the newest decoded frame into dst (ID3D11Texture2D* of matching size and format,
 // D3D11_USAGE_DEFAULT). Returns 1 when a frame newer than *sequence was copied and updates *sequence.
 // Must be called from the thread that owns rendering on the D3D11 device.
-PSLC_API int pslc_session_copy_frame(PslcSession *session, void *dst_texture, uint64_t *sequence);
+// Microseconds on the monotonic clock that frame timestamps use.
+PSLC_API uint64_t pslc_now_us(void);
+
+typedef struct PslcFrameTimes
+{
+	uint64_t received_us; // the complete compressed frame arrived from the network
+	uint64_t decoded_us; // the decoder handed out the picture
+} PslcFrameTimes;
+
+// times may be NULL; it is filled for the copied frame.
+PSLC_API int pslc_session_copy_frame(PslcSession *session, void *dst_texture, uint64_t *sequence, PslcFrameTimes *times);
 
 typedef struct PslcStats
 {

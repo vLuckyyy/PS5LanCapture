@@ -86,6 +86,10 @@ impl SessionSink for Sink {
     fn on_feedback(&self, feedback: Feedback) {
         self.controller.on_feedback(feedback);
     }
+
+    fn on_frame(&self) {
+        (self.waker)();
+    }
 }
 
 pub struct StreamController {

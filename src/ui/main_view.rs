@@ -301,6 +301,17 @@ fn stats_overlay(ui: &mut Ui, app: &App, rect: egui::Rect, video: Option<&VideoV
                 Some(rtt) => format!("RTT       {rtt:.1} ms"),
                 None => "RTT       n/a".into(),
             }));
+            if let Some(latency) = app.display_latency {
+                let network = stats.rtt_ms.unwrap_or(0.0) / 2.0;
+                ui.label(mono(format!(
+                    "Delay     {:.1} ms (net {:.1} + decode {:.1} + display {:.1})",
+                    network + latency.decode_ms + latency.display_ms,
+                    network,
+                    latency.decode_ms,
+                    latency.display_ms
+                )))
+                .on_hover_text("Time a frame spends on the way from the console's network output to your display. Encoding on the PS5 and the monitor's own delay are not included.");
+            }
             ui.label(mono(format!(
                 "Decoder   {}",
                 match stats.hardware_decoding {

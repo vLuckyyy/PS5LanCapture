@@ -121,6 +121,8 @@ pub struct App {
     pub requests: Vec<WindowRequest>,
     pub gpu_error: Option<String>,
     pub rtx_possible: bool,
+    pub tearing_supported: bool,
+    pub display_latency: Option<crate::render::DisplayLatency>,
     pub render_device: *mut std::ffi::c_void,
     config_dirty: bool,
     last_save: Instant,
@@ -165,6 +167,8 @@ impl App {
             requests: Vec::new(),
             gpu_error: None,
             rtx_possible: false,
+            tearing_supported: false,
+            display_latency: None,
             render_device: std::ptr::null_mut(),
             config_dirty: false,
             last_save: Instant::now(),
@@ -411,6 +415,13 @@ impl App {
                     });
                 });
             });
+    }
+
+    /// Streaming with frames shown the moment they are decoded instead of on the display's V-Sync.
+    pub fn immediate_display(&self) -> bool {
+        self.tearing_supported
+            && self.config.video.display_sync == crate::config::DisplaySync::Immediate
+            && matches!(self.stream.state, StreamState::Streaming { .. })
     }
 
     pub fn wants_continuous_redraw(&self) -> bool {

@@ -421,6 +421,8 @@ typedef struct PslcDecoder
 	CRITICAL_SECTION lock;
 	uint64_t sequence;
 	uint64_t copied_sequence;
+	uint64_t received_us;
+	uint64_t decoded_us;
 	int hw;
 	int failed;
 	ID3D11Device *device;
@@ -524,9 +526,21 @@ static void pslc_decoder_close(PslcDecoder *decoder)
 	DeleteCriticalSection(&decoder->lock);
 }
 
+PSLC_API uint64_t pslc_now_us(void)
+{
+	static LARGE_INTEGER frequency;
+	LARGE_INTEGER counter;
+	if(!frequency.QuadPart)
+		QueryPerformanceFrequency(&frequency);
+	QueryPerformanceCounter(&counter);
+	return (uint64_t)(counter.QuadPart / frequency.QuadPart) * 1000000ull
+		+ (uint64_t)(counter.QuadPart % frequency.QuadPart) * 1000000ull / (uint64_t)frequency.QuadPart;
+}
+
 // Returns number of frames produced, or -1 on error.
 static int pslc_decoder_push(PslcDecoder *decoder, uint8_t *buf, size_t size, uint64_t *dropped)
 {
+	uint64_t received_us = pslc_now_us();
 	decoder->packet->data = buf;
 	decoder->packet->size = (int)size;
 	int r = avcodec_send_packet(decoder->ctx, decoder->packet);
@@ -557,6 +571,8 @@ static int pslc_decoder_push(PslcDecoder *decoder, uint8_t *buf, size_t size, ui
 		av_frame_unref(decoder->latest);
 		av_frame_move_ref(decoder->latest, decoder->scratch);
 		decoder->sequence++;
+		decoder->received_us = received_us;
+		decoder->decoded_us = pslc_now_us();
 		LeaveCriticalSection(&decoder->lock);
 		produced++;
 	}
@@ -821,6 +837,8 @@ static bool pslc_video_cb(uint8_t *buf, size_t buf_size, int32_t frames_lost, bo
 		return false;
 	}
 	InterlockedAdd64(&s->frames_decoded, produced);
+	if(produced > 0)
+		pslc_emit(s, PSLC_EVENT_FRAME, 0, 0, NULL);
 	return true;
 }
 
@@ -1025,7 +1043,7 @@ PSLC_API int pslc_session_frame_info(PslcSession *s, PslcFrameInfo *out)
 	return out->format != PSLC_FORMAT_NONE;
 }
 
-PSLC_API int pslc_session_copy_frame(PslcSession *s, void *dst_texture, uint64_t *sequence)
+PSLC_API int pslc_session_copy_frame(PslcSession *s, void *dst_texture, uint64_t *sequence, PslcFrameTimes *times)
 {
 	if(!s || !dst_texture || !sequence)
 		return 0;
@@ -1034,8 +1052,11 @@ PSLC_API int pslc_session_copy_frame(PslcSession *s, void *dst_texture, uint64_t
 	if(!frame)
 		return 0;
 	uint64_t seq;
+	PslcFrameTimes frame_times;
 	EnterCriticalSection(&decoder->lock);
 	seq = decoder->sequence;
+	frame_times.received_us = decoder->received_us;
+	frame_times.decoded_us = decoder->decoded_us;
 	int have = decoder->latest->buf[0] && seq != *sequence;
 	if(have && av_frame_ref(frame, decoder->latest) < 0)
 		have = 0;
@@ -1068,6 +1089,8 @@ PSLC_API int pslc_session_copy_frame(PslcSession *s, void *dst_texture, uint64_t
 	if(copied)
 	{
 		*sequence = seq;
+		if(times)
+			*times = frame_times;
 		EnterCriticalSection(&decoder->lock);
 		decoder->copied_sequence = seq;
 		LeaveCriticalSection(&decoder->lock);

@@ -4,7 +4,7 @@ use super::widgets::info_box;
 use super::wizard::{Step, Wizard};
 use super::{App, theme};
 use crate::audio;
-use crate::config::{ColorLook, Resolution, Upscaling};
+use crate::config::{ColorLook, DisplaySync, Resolution, Upscaling};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Tab {
@@ -145,6 +145,7 @@ fn console_tab(ui: &mut Ui, app: &mut App) {
 
 fn video_tab(ui: &mut Ui, app: &mut App) {
     let before = app.config.video.clone();
+    let tearing_supported = app.tearing_supported;
     let video = &mut app.config.video;
     egui::Grid::new("video-grid")
         .num_columns(2)
@@ -188,6 +189,17 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             ui.end_row();
             ui.label("Decoding");
             ui.checkbox(&mut video.hardware_decoding, "Hardware (GPU, D3D11VA)");
+            ui.end_row();
+            ui.label("Display sync");
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut video.display_sync, DisplaySync::VSync, DisplaySync::VSync.label())
+                    .on_hover_text("Each frame waits for the next display refresh. Smooth on every monitor.");
+                ui.add_enabled_ui(tearing_supported, |ui| {
+                    ui.selectable_value(&mut video.display_sync, DisplaySync::Immediate, DisplaySync::Immediate.label())
+                        .on_hover_text("Frames go to the display the moment they are decoded. Lowest delay and perfectly even pacing with G-Sync or FreeSync; without it you will see tearing.")
+                        .on_disabled_hover_text("This display or Windows version does not support it");
+                });
+            });
             ui.end_row();
         });
     ui.add_space(6.0);

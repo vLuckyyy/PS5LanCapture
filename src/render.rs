@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{HMODULE, HWND};
+use windows::Win32::Foundation::{HANDLE, HMODULE, HWND};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -9,6 +9,7 @@ use windows::Win32::Graphics::Direct3D::{
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use windows::core::{Interface, PCSTR, s};
 
 use crate::config::{ColorGrade, Upscaling};
@@ -513,6 +514,50 @@ pub struct VideoSurface {
     processed: Option<(u64, Enhance, bool)>,
 }
 
+/// How long a frame takes inside the app, smoothed over recent frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DisplayLatency {
+    /// Compressed frame received to picture decoded.
+    pub decode_ms: f32,
+    /// Picture decoded to handed over to the display.
+    pub display_ms: f32,
+}
+
+#[derive(Default)]
+pub struct LatencyMeter {
+    current: Option<DisplayLatency>,
+}
+
+impl LatencyMeter {
+    const SMOOTHING: f32 = 0.1;
+
+    pub fn record(&mut self, times: native::FrameTimes, presented_us: u64) {
+        let ms = |from: u64, to: u64| to.saturating_sub(from) as f32 / 1000.0;
+        let sample = DisplayLatency {
+            decode_ms: ms(times.received_us, times.decoded_us),
+            display_ms: ms(times.decoded_us, presented_us),
+        };
+        if times.received_us == 0 || sample.display_ms > 1000.0 {
+            return;
+        }
+        self.current = Some(match self.current {
+            Some(c) => DisplayLatency {
+                decode_ms: c.decode_ms + (sample.decode_ms - c.decode_ms) * Self::SMOOTHING,
+                display_ms: c.display_ms + (sample.display_ms - c.display_ms) * Self::SMOOTHING,
+            },
+            None => sample,
+        });
+    }
+
+    pub fn get(&self) -> Option<DisplayLatency> {
+        self.current
+    }
+
+    pub fn reset(&mut self) {
+        self.current = None;
+    }
+}
+
 /// The texture to show for the current video frame.
 #[derive(Clone, Copy, Debug)]
 pub struct VideoOutput {
@@ -533,6 +578,11 @@ pub struct Renderer {
     video: Option<VideoSurface>,
     upscaler: Upscaler,
     size: (u32, u32),
+    swap_flags: DXGI_SWAP_CHAIN_FLAG,
+    tearing: bool,
+    frame_slot: Option<HANDLE>,
+    unpresented: Option<native::FrameTimes>,
+    latency: LatencyMeter,
 }
 
 impl Renderer {
@@ -572,6 +622,23 @@ impl Renderer {
         }
         let factory: IDXGIFactory2 =
             unsafe { adapter.GetParent() }.map_err(|e| err("DXGI factory", e))?;
+        let mut allow_tearing = windows::core::BOOL(0);
+        let tearing = factory
+            .cast::<IDXGIFactory5>()
+            .and_then(|f| unsafe {
+                f.CheckFeatureSupport(
+                    DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                    &mut allow_tearing as *mut _ as *mut c_void,
+                    size_of::<windows::core::BOOL>() as u32,
+                )
+            })
+            .is_ok()
+            && allow_tearing.as_bool();
+        let mut swap_flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0;
+        if tearing {
+            swap_flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0;
+        }
+        let swap_flags = DXGI_SWAP_CHAIN_FLAG(swap_flags);
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: width.max(1),
             Height: height.max(1),
@@ -586,7 +653,7 @@ impl Renderer {
             Scaling: DXGI_SCALING_STRETCH,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            Flags: 0,
+            Flags: swap_flags.0 as u32,
         };
         let swap_chain =
             unsafe { factory.CreateSwapChainForHwnd(&device, hwnd, &desc, None, None) }
@@ -595,6 +662,19 @@ impl Renderer {
             let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
         }
 
+        let frame_slot = swap_chain
+            .cast::<IDXGISwapChain2>()
+            .ok()
+            .and_then(|sc| unsafe {
+                let _ = sc.SetMaximumFrameLatency(1);
+                let handle = sc.GetFrameLatencyWaitableObject();
+                (!handle.is_invalid()).then_some(handle)
+            });
+        log::info!(
+            "Display: tearing (G-Sync/FreeSync) {}, frame latency 1 {}",
+            if tearing { "available" } else { "unavailable" },
+            if frame_slot.is_some() { "on" } else { "off" }
+        );
         let pipeline = VideoPipeline::new(&device)?;
         let egui = egui_directx11::Renderer::new(&device).map_err(|e| err("egui renderer", e))?;
         let upscaler = Upscaler::new(&device, &context);
@@ -608,6 +688,11 @@ impl Renderer {
             video: None,
             upscaler,
             size: (width.max(1), height.max(1)),
+            swap_flags,
+            tearing,
+            frame_slot,
+            unpresented: None,
+            latency: LatencyMeter::default(),
         };
         renderer.create_back_buffer()?;
         Ok(renderer)
@@ -641,13 +726,8 @@ impl Renderer {
             self.context.Flush();
         }
         match unsafe {
-            self.swap_chain.ResizeBuffers(
-                0,
-                width,
-                height,
-                DXGI_FORMAT_UNKNOWN,
-                DXGI_SWAP_CHAIN_FLAG(0),
-            )
+            self.swap_chain
+                .ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, self.swap_flags)
         } {
             Ok(()) => self.size = (width, height),
             Err(e) => log::error!("ResizeBuffers: {e}"),
@@ -657,7 +737,27 @@ impl Renderer {
         }
     }
 
+    pub fn tearing_supported(&self) -> bool {
+        self.tearing
+    }
+
+    pub fn latency(&self) -> Option<DisplayLatency> {
+        self.latency.get()
+    }
+
+    /// Blocks until the swap chain can take a frame (at most one is ever queued), so the frame
+    /// is picked as late as possible before the display shows it.
+    pub fn wait_for_frame_slot(&self) {
+        if let Some(handle) = self.frame_slot {
+            unsafe {
+                WaitForSingleObjectEx(handle, 100, true);
+            }
+        }
+    }
+
     pub fn drop_video(&mut self) {
+        self.unpresented = None;
+        self.latency.reset();
         self.upscaler.reset(&mut self.egui);
         if let Some(video) = self.video.take() {
             self.egui.unregister_user_texture(video.texture_id);
@@ -781,7 +881,8 @@ impl Renderer {
         if info.sequence != video.sequence {
             let mut sequence = video.sequence;
             let copied = unsafe { session.copy_frame(video.yuv.as_raw(), &mut sequence) };
-            if copied {
+            if let Some(times) = copied {
+                self.unpresented = Some(times);
                 video.sequence = sequence;
                 video.has_frame = true;
                 video.hdr = info.hdr != 0;
@@ -849,6 +950,7 @@ impl Renderer {
         &mut self,
         ctx: &egui::Context,
         output: egui_directx11::RendererOutput,
+        immediate: bool,
     ) -> Result<(), String> {
         let Some(back_buffer) = self.back_buffer.clone() else {
             return Ok(());
@@ -862,10 +964,47 @@ impl Renderer {
         self.egui
             .render(&self.context, &back_buffer, ctx, output)
             .map_err(|e| e.to_string())?;
-        let hr = unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) };
+        let hr = unsafe {
+            if immediate && self.tearing {
+                self.swap_chain.Present(0, DXGI_PRESENT_ALLOW_TEARING)
+            } else {
+                self.swap_chain.Present(1, DXGI_PRESENT(0))
+            }
+        };
+        if let Some(times) = self.unpresented.take() {
+            self.latency.record(times, native::now_us());
+        }
         if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
             return Err("Graphics device lost (the GPU driver was reset)".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_meter_splits_and_smooths() {
+        let mut meter = LatencyMeter::default();
+        assert_eq!(meter.get(), None);
+        let times = native::FrameTimes {
+            received_us: 1_000_000,
+            decoded_us: 1_002_000,
+        };
+        meter.record(times, 1_008_000);
+        assert_eq!(
+            meter.get(),
+            Some(DisplayLatency {
+                decode_ms: 2.0,
+                display_ms: 6.0
+            })
+        );
+        meter.record(times, 1_018_000);
+        let smoothed = meter.get().unwrap();
+        assert!(smoothed.display_ms > 6.0 && smoothed.display_ms < 8.0);
+        meter.record(native::FrameTimes::default(), 5_000_000);
+        assert_eq!(meter.get(), Some(smoothed));
     }
 }

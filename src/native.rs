@@ -44,6 +44,18 @@ pub struct RawSessionConfig {
     pub packet_loss_max: f64,
 }
 
+/// Timestamps of one frame in microseconds on the `now_us` clock.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct FrameTimes {
+    pub received_us: u64,
+    pub decoded_us: u64,
+}
+
+pub fn now_us() -> u64 {
+    unsafe { pslc_now_us() }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct RawFrameInfo {
@@ -129,7 +141,9 @@ unsafe extern "C" {
         session: *mut c_void,
         dst_texture: *mut c_void,
         sequence: *mut u64,
+        times: *mut FrameTimes,
     ) -> c_int;
+    fn pslc_now_us() -> u64;
     fn pslc_session_stats(session: *mut c_void, out: *mut RawStats);
 }
 
@@ -392,6 +406,8 @@ pub trait SessionSink: Send + Sync {
     fn on_event(&self, event: SessionEvent);
     fn on_audio(&self, pcm: &[i16], channels: u32, rate: u32);
     fn on_feedback(&self, _feedback: Feedback) {}
+    /// A new decoded frame is ready; called on the video thread.
+    fn on_frame(&self) {}
 }
 
 pub struct SessionParams {
@@ -428,6 +444,10 @@ unsafe extern "C" fn event_trampoline(
     user: *mut c_void,
 ) {
     let sink = unsafe { &*(user as *const Arc<dyn SessionSink>) };
+    if kind == 6 {
+        sink.on_frame();
+        return;
+    }
     let message = if msg.is_null() {
         String::new()
     } else {
@@ -553,8 +573,15 @@ impl Session {
     /// # Safety
     /// `texture` must be a live ID3D11Texture2D created on the device passed in `SessionParams`,
     /// matching the size and format from `frame_info`.
-    pub unsafe fn copy_frame(&self, texture: *mut c_void, sequence: &mut u64) -> bool {
-        unsafe { pslc_session_copy_frame(self.handle, texture, sequence) != 0 }
+    pub unsafe fn copy_frame(
+        &self,
+        texture: *mut c_void,
+        sequence: &mut u64,
+    ) -> Option<FrameTimes> {
+        let mut times = FrameTimes::default();
+        let copied =
+            unsafe { pslc_session_copy_frame(self.handle, texture, sequence, &mut times) != 0 };
+        copied.then_some(times)
     }
 
     pub fn stats(&self) -> RawStats {

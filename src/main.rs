@@ -179,6 +179,10 @@ impl Runner {
         ) else {
             return false;
         };
+        let immediate = self.app.immediate_display();
+        if !immediate && self.app.wants_continuous_redraw() {
+            renderer.wait_for_frame_slot();
+        }
         self.last_redraw = Instant::now();
         let session_id = self.app.stream.session().map(|s| s.id()).unwrap_or(0);
         if session_id != self.last_session {
@@ -222,6 +226,8 @@ impl Runner {
                 pixel_perfect: settings.upscaling == config::Upscaling::PixelPerfect,
             });
         self.app.rtx_possible = renderer.rtx_possible();
+        self.app.tearing_supported = renderer.tearing_supported();
+        self.app.display_latency = renderer.latency();
 
         let input = egui_winit.take_egui_input(&window);
         let app = &mut self.app;
@@ -233,7 +239,7 @@ impl Runner {
             .unwrap_or(Duration::MAX);
         let (renderer_output, platform_output, _) = egui_directx11::split_output(output);
         egui_winit.handle_platform_output(&window, platform_output);
-        if let Err(e) = renderer.render(&self.egui_ctx, renderer_output) {
+        if let Err(e) = renderer.render(&self.egui_ctx, renderer_output, immediate) {
             log::error!("{e}");
             self.app.stream.disconnect();
             let size = window.inner_size();
@@ -335,6 +341,19 @@ impl ApplicationHandler<UserEvent> for Runner {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(100),
             ));
+            return;
+        }
+        if self.app.immediate_display() {
+            let tick = Instant::now() + Duration::from_millis(250);
+            let wake = match self.next_repaint {
+                Some(at) if at <= Instant::now() => {
+                    window.request_redraw();
+                    tick
+                }
+                Some(at) => at.min(tick),
+                None => tick,
+            };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
             return;
         }
         if self.app.wants_continuous_redraw() {

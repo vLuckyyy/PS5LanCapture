@@ -498,3 +498,50 @@ fn enhance_pipeline_on_gpu() {
         differing as f64 * 100.0 / results[0].2.len() as f64
     );
 }
+
+#[test]
+#[ignore = "needs a Direct3D 11 GPU and a desktop session"]
+fn swap_chain_presents_in_both_sync_modes() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+    };
+    use windows::core::w;
+
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            w!("pslc swap chain test"),
+            WS_OVERLAPPEDWINDOW,
+            0,
+            0,
+            640,
+            360,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    let mut renderer = crate::render::Renderer::new(hwnd, 640, 360).unwrap();
+    println!("tearing supported: {}", renderer.tearing_supported());
+    let ctx = egui::Context::default();
+    for (immediate, size) in [(false, 640), (true, 640), (true, 800), (false, 800)] {
+        renderer.resize(size, 360);
+        for _ in 0..3 {
+            if !immediate {
+                renderer.wait_for_frame_slot();
+            }
+            let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            let (renderer_output, _, _) = egui_directx11::split_output(output);
+            renderer
+                .render(&ctx, renderer_output, immediate)
+                .unwrap_or_else(|e| panic!("present (immediate={immediate}) failed: {e}"));
+        }
+    }
+    drop(renderer);
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+}

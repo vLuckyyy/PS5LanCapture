@@ -64,6 +64,21 @@ impl Upscaling {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisplaySync {
+    VSync,
+    Immediate,
+}
+
+impl DisplaySync {
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplaySync::VSync => "V-Sync (no tearing)",
+            DisplaySync::Immediate => "Immediate (G-Sync / FreeSync)",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ColorGrade {
@@ -170,6 +185,7 @@ pub struct VideoSettings {
     pub clarity: f32,
     pub look: ColorLook,
     pub custom_grade: ColorGrade,
+    pub display_sync: DisplaySync,
 }
 
 impl Default for VideoSettings {
@@ -188,6 +204,7 @@ impl Default for VideoSettings {
             clarity: 0.0,
             look: ColorLook::Natural,
             custom_grade: ColorGrade::default(),
+            display_sync: DisplaySync::VSync,
         }
     }
 }
