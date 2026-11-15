@@ -298,6 +298,13 @@ impl App {
         });
         let video = self.config.video.clone();
         self.stream.tick(&video, device, ready.flatten());
+        if let Some((w, h)) = self.stream.take_resolution_rejected() {
+            self.config.video.resolution = crate::config::Resolution::P1080;
+            self.mark_dirty();
+            self.notify(format!(
+                "Your PS5 refused {w}x{h} over Remote Play, so the resolution is back at 1080p."
+            ));
+        }
         if let Some(test) = &mut self.quality_test {
             test.tick();
         }

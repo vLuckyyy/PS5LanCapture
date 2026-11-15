@@ -11,6 +11,8 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(25);
 const WAKE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(20);
+const RELEASE_WINDOW: Duration = Duration::from_secs(40);
+const RELEASE_RETRY_DELAY: Duration = Duration::from_secs(4);
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
@@ -102,6 +104,10 @@ pub struct StreamController {
     last_stats: Option<(Instant, RawStats)>,
     last_frame_progress: Instant,
     pub stats: StreamStats,
+    requested_size: (u32, u32),
+    last_session_end: Option<Instant>,
+    waiting_for_release_since: Option<Instant>,
+    resolution_rejected: Option<(u32, u32)>,
 }
 
 pub fn friendly_quit_message(reason: i32, raw: &str) -> String {
@@ -144,6 +150,11 @@ pub fn session_params(
     }
 }
 
+/// The console accepted the session but its encoder refused the requested video mode.
+pub fn is_video_mode_rejection(message: &str) -> bool {
+    message.contains("AvCap failed to initialize video") || message.contains("Nagare did not init")
+}
+
 pub fn is_retryable(reason: i32) -> bool {
     matches!(reason, 2 | 7 | 8 | 10 | 11)
 }
@@ -172,6 +183,10 @@ impl StreamController {
             last_stats: None,
             last_frame_progress: Instant::now(),
             stats: StreamStats::default(),
+            requested_size: (0, 0),
+            last_session_end: None,
+            waiting_for_release_since: None,
+            resolution_rejected: None,
         }
     }
 
@@ -207,9 +222,15 @@ impl StreamController {
         self.auto_reconnect = enabled;
     }
 
+    /// Set once when the console refused a resolution above 1080p; the app falls back to 1080p.
+    pub fn take_resolution_rejected(&mut self) -> Option<(u32, u32)> {
+        self.resolution_rejected.take()
+    }
+
     pub fn connect(&mut self, target: ConnectTarget, standby: bool) {
         self.stop_session();
         self.reconnect_attempt = 0;
+        self.waiting_for_release_since = None;
         self.target = Some(target);
         if standby {
             self.wake();
@@ -269,6 +290,7 @@ impl StreamController {
         self.controller.set_session(None);
         if let Some(session) = self.session.take() {
             self.generation += 1;
+            self.last_session_end = Some(Instant::now());
             std::thread::Builder::new()
                 .name("session-teardown".into())
                 .spawn(move || drop(session))
@@ -286,6 +308,7 @@ impl StreamController {
         self.stop_session();
         self.generation += 1;
         let (width, height) = video.resolution.size();
+        self.requested_size = (width, height);
         let params = session_params(&target, video, (width, height), video.bitrate_kbps, device);
         let sink = self.make_sink();
         log::info!(
@@ -404,6 +427,7 @@ impl StreamController {
             SessionEvent::Connected => {
                 log::info!("Connected to the console");
                 self.reconnect_attempt = 0;
+                self.waiting_for_release_since = None;
                 self.last_frame_progress = Instant::now();
                 self.state = StreamState::Streaming {
                     since: Instant::now(),
@@ -423,6 +447,22 @@ impl StreamController {
                 if !is_error && reason == 1 {
                     return;
                 }
+                if reason == 4 && self.retry_while_console_releases() {
+                    return;
+                }
+                if is_video_mode_rejection(&message) && self.requested_size.1 > 1080 {
+                    let (w, h) = self.requested_size;
+                    log::warn!("The console refused {w}x{h}, falling back to 1080p");
+                    self.resolution_rejected = Some((w, h));
+                    self.waiting_for_release_since = Some(Instant::now());
+                    self.retry_after(
+                        RELEASE_RETRY_DELAY,
+                        format!(
+                            "Your PS5 does not stream {w}x{h} over Remote Play. Switching to 1080p."
+                        ),
+                    );
+                    return;
+                }
                 let friendly = friendly_quit_message(reason, &message);
                 let was_streaming = matches!(self.state, StreamState::Streaming { .. });
                 self.schedule_reconnect_or_fail(
@@ -431,6 +471,41 @@ impl StreamController {
                 );
             }
         }
+    }
+
+    /// The PS5 keeps a session busy for several seconds after it ends, so an "in use" answer right
+    /// after our own session is retried quietly instead of blaming another device.
+    fn retry_while_console_releases(&mut self) -> bool {
+        let recent_own_session = self
+            .last_session_end
+            .is_some_and(|t| t.elapsed() < RELEASE_WINDOW);
+        let since = match self.waiting_for_release_since {
+            Some(since) => since,
+            None if recent_own_session && self.auto_reconnect => {
+                *self.waiting_for_release_since.insert(Instant::now())
+            }
+            None => return false,
+        };
+        if since.elapsed() > RELEASE_WINDOW || self.target.is_none() {
+            self.waiting_for_release_since = None;
+            return false;
+        }
+        log::info!("Console still busy with the previous session, retrying");
+        self.retry_after(
+            RELEASE_RETRY_DELAY,
+            "Waiting for the console to close the previous session.".into(),
+        );
+        true
+    }
+
+    fn retry_after(&mut self, delay: Duration, reason: String) {
+        self.stop_session();
+        self.reconnect_attempt += 1;
+        self.state = StreamState::Reconnecting {
+            attempt: self.reconnect_attempt,
+            at: Instant::now() + delay,
+            reason,
+        };
     }
 
     fn update_stats(&mut self) {
@@ -476,6 +551,16 @@ impl Drop for StreamController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_refused_video_mode() {
+        assert!(is_video_mode_rejection(
+            "Remote has disconnected from Stream Connection: Nagare did not init! AvCap failed to initialize video: [InitResult:-6]"
+        ));
+        assert!(!is_video_mode_rejection(
+            "Remote Play on Console is already in use"
+        ));
+    }
 
     #[test]
     fn reconnect_backoff_grows_and_caps() {

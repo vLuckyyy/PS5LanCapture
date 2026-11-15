@@ -5,16 +5,21 @@ use std::time::{Duration, Instant};
 
 use crate::config::{Resolution, VideoSettings};
 use crate::native::{RawStats, Session, SessionEvent, SessionSink};
-use crate::session::{ConnectTarget, Waker, friendly_quit_message, session_params};
+use crate::session::{
+    ConnectTarget, Waker, friendly_quit_message, is_video_mode_rejection, session_params,
+};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WARMUP: Duration = Duration::from_secs(3);
 const MEASURE: Duration = Duration::from_secs(8);
-const COOLDOWN: Duration = Duration::from_secs(4);
+const COOLDOWN: Duration = Duration::from_secs(8);
+const MAX_BUSY_RETRIES: u32 = 4;
+const MIN_MOTION_SHARE: f32 = 0.25;
 const PROBE_BITRATE_KBPS: u32 = 40_000;
 const BITRATE_LADDER_KBPS: [u32; 6] = [15_000, 25_000, 40_000, 60_000, 80_000, 100_000];
 const MAX_LOSS: f32 = 0.01;
+const TOO_STATIC: &str = "picture too static to measure";
 const SAFETY_MARGIN: f32 = 0.85;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +100,9 @@ pub fn judge(trial: &Trial, m: &Measurement, target_fps: u32) -> (bool, String) 
         ),
         TrialKind::Resolution if !smooth => (false, format!("too slow: {stats}")),
         TrialKind::Resolution => (true, stats),
+        TrialKind::Bitrate if m.mbps < trial.bitrate_kbps as f32 / 1000.0 * MIN_MOTION_SHARE => {
+            (false, format!("{TOO_STATIC}: {stats}"))
+        }
         TrialKind::Bitrate if m.loss > MAX_LOSS || m.decode_errors > 0 => {
             (false, format!("packet loss: {stats}"))
         }
@@ -175,6 +183,7 @@ pub struct QualityTest {
     phase: TrialKind,
     running: Option<Running>,
     next_start: Instant,
+    busy_retries: u32,
     pub results: Vec<TrialResult>,
     pub finished: bool,
     pub aborted: Option<String>,
@@ -197,6 +206,7 @@ impl QualityTest {
             phase: TrialKind::Resolution,
             running: None,
             next_start: Instant::now() + COOLDOWN,
+            busy_retries: 0,
             results: Vec::new(),
             finished: false,
             aborted: None,
@@ -250,6 +260,13 @@ impl QualityTest {
             if passed { "passed" } else { "failed" }
         );
         self.stop_running();
+        self.busy_retries = 0;
+        if detail.starts_with(TOO_STATIC) {
+            self.aborted = Some(
+                "The picture was too static to measure the bitrate. Start a game with a lot of motion and run the test again.".into(),
+            );
+            self.queue.clear();
+        }
         self.results.push(TrialResult {
             trial,
             passed,
@@ -323,9 +340,19 @@ impl QualityTest {
             return;
         };
         let mut outcome: Option<(bool, String)> = None;
+        let mut busy = false;
         while let Ok(event) = running.events.try_recv() {
             match event {
                 SessionEvent::Connected => running.connected_at = Some(Instant::now()),
+                SessionEvent::Quit { reason: 4, .. } if self.busy_retries < MAX_BUSY_RETRIES => {
+                    busy = true;
+                }
+                SessionEvent::Quit {
+                    reason, message, ..
+                } if is_video_mode_rejection(&message) => {
+                    log::info!("Quality test: console refused the video mode (code {reason})");
+                    outcome = Some((false, "the console does not support this resolution".into()));
+                }
                 SessionEvent::Quit {
                     reason, message, ..
                 } => outcome = Some((false, friendly_quit_message(reason, &message))),
@@ -337,6 +364,17 @@ impl QualityTest {
                 }
                 _ => {}
             }
+        }
+        if busy {
+            let trial = running.trial;
+            log::info!(
+                "Quality test: console still busy, retrying {}",
+                trial.label()
+            );
+            self.busy_retries += 1;
+            self.stop_running();
+            self.queue.push_front(trial);
+            return;
         }
         let now = Instant::now();
         if outcome.is_none() {
@@ -440,6 +478,25 @@ mod tests {
         assert!(judge(&trial, &m, 60).0);
         m.fps = 30.0;
         assert!(!judge(&trial, &m, 60).0);
+    }
+
+    #[test]
+    fn static_picture_is_not_a_bitrate_pass() {
+        let trial = Trial {
+            kind: TrialKind::Bitrate,
+            size: (1920, 1080),
+            bitrate_kbps: 15_000,
+        };
+        let m = Measurement {
+            decoded: (1920, 1080),
+            fps: 60.0,
+            mbps: 0.1,
+            loss: 0.0,
+            decode_errors: 0,
+        };
+        let (passed, detail) = judge(&trial, &m, 60);
+        assert!(!passed);
+        assert!(detail.starts_with(TOO_STATIC));
     }
 
     #[test]
