@@ -70,13 +70,18 @@ pub fn status_chip(ui: &mut Ui, state: &StreamState) {
 
 /// Paints the video letterboxed into `rect`; returns the response for the full area.
 pub const VIDEO_TARGET_ID: &str = "video-target-px";
+/// Where a composited (HDR) video goes on screen, as [left, top, right, bottom] in pixels.
+pub const VIDEO_RECT_ID: &str = "video-rect-px";
 
 /// Paints the video letterboxed into `rect` and remembers the on-screen size in physical pixels,
 /// which the renderer uses as the upscaling target on the next frame.
 pub fn video_area(ui: &mut Ui, rect: Rect, video: Option<&VideoView>) -> Response {
     let response = ui.allocate_rect(rect, Sense::click());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+    let composited = video.is_some_and(|v| v.composited);
+    if !composited {
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+    }
     if let Some(video) = video {
         let ppp = ui.ctx().pixels_per_point();
         let aspect = video.source[0] as f32 / video.source[1].max(1) as f32;
@@ -97,12 +102,23 @@ pub fn video_area(ui: &mut Ui, rect: Rect, video: Option<&VideoView>) -> Respons
             (target.min.x * ppp).round() / ppp - target.min.x,
             (target.min.y * ppp).round() / ppp - target.min.y,
         ));
-        painter.image(
-            video.texture_id,
-            target,
-            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        if composited {
+            let px = [
+                target.min.x * ppp,
+                target.min.y * ppp,
+                target.max.x * ppp,
+                target.max.y * ppp,
+            ];
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::new(VIDEO_RECT_ID), px.map(f32::round)));
+        } else {
+            painter.image(
+                video.texture_id,
+                target,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
     }
     response
 }

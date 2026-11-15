@@ -19,11 +19,16 @@ pub fn ui(ui: &mut Ui, app: &mut App, video: Option<&VideoView>) {
     if !hide_controls {
         top_bar(ui, app);
     }
+    let showing_video = streaming && video.is_some();
+    let background = if showing_video && video.is_some_and(|v| v.composited) {
+        egui::Color32::TRANSPARENT
+    } else {
+        egui::Color32::BLACK
+    };
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(egui::Color32::BLACK))
+        .frame(egui::Frame::new().fill(background))
         .show(ui, |ui| {
             let rect = ui.max_rect();
-            let showing_video = streaming && video.is_some();
             let response = widgets::video_area(ui, rect, if showing_video { video } else { None });
             if response.double_clicked() {
                 app.requests.push(WindowRequest::ToggleFullscreen);
@@ -328,7 +333,9 @@ fn stats_overlay(ui: &mut Ui, app: &App, rect: egui::Rect, video: Option<&VideoV
             ));
             ui.label(mono(format!(
                 "Range     {}",
-                if video.is_some_and(|v| v.hdr) {
+                if video.is_some_and(|v| v.composited) {
+                    "HDR10"
+                } else if video.is_some_and(|v| v.hdr) {
                     "HDR10, tone mapped"
                 } else {
                     "SDR"

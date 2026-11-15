@@ -23,6 +23,7 @@ The official PS Remote Play app was laggy and the picture quality was bad. So I 
 - Upscaling for big windows and fullscreen on 1440p/4K monitors: NVIDIA RTX Video Super Resolution, with AMD FSR 1 on other GPUs
 - Enhance: debanding for compressed gradients, sharper color edges (luma guided chroma upsampling), adjustable sharpening
 - Low delay display: frames are picked right before the display refresh, optional immediate mode for G-Sync and FreeSync, and a delay readout (network, decode, display) in the stats overlay
+- HDR10 output: on an HDR display the PS5 HDR stream is shown as real HDR10 (10 bit, BT.2020), with highlights fitted to the display's peak brightness
 - Look: clarity (local contrast), color presets Natural, Vivid, Cinema or custom, and pixel perfect 2x/3x scaling
 - Optional 10 bit HDR stream from the PS5, tone mapped for the window and Discord (less banding in skies and dark scenes)
 - Game audio through any Windows output device, with volume, mute and buffer settings

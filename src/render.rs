@@ -1,6 +1,7 @@
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HANDLE, HMODULE, HWND};
+use windows::Win32::Foundation::{HANDLE, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -10,6 +11,7 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Threading::WaitForSingleObjectEx;
+use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 use windows::core::{Interface, PCSTR, s};
 
 use crate::config::{ColorGrade, Upscaling};
@@ -33,10 +35,12 @@ cbuffer Params : register(b0) {
     uint flags;
     uint ten_bit;
     float2 luma_size;
+    float peak_nits;
 };
 
 static const uint FLAG_HDR = 1;
 static const uint FLAG_BILATERAL = 2;
+static const uint FLAG_PQ_OUTPUT = 4;
 
 float unit_luma(float s) {
     return ten_bit != 0 ? (s * 65535.0 / 64.0 - 64.0) / 876.0 : (s * 255.0 - 16.0) / 219.0;
@@ -81,6 +85,29 @@ float3 pq_to_nits(float3 e) {
     return pow(max(p - c1, 0.0) / (c2 - c3 * p), 1.0 / m1) * 10000.0;
 }
 
+float3 nits_to_pq(float3 nits) {
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    float3 y = pow(saturate(nits / 10000.0), m1);
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+}
+
+// Keeps PQ / BT.2020 and only rolls highlights off towards what the display can show.
+float3 fit_to_display(float3 rgb2020_pq) {
+    float3 nits = pq_to_nits(rgb2020_pq);
+    float knee = peak_nits * 0.75;
+    float top = max(max(nits.r, nits.g), nits.b);
+    if (top > knee) {
+        float range = peak_nits - knee;
+        float mapped = knee + range * (1.0 - exp(-(top - knee) / range));
+        nits *= mapped / top;
+    }
+    return nits_to_pq(nits);
+}
+
 float3 tonemap_hdr(float3 rgb2020_pq) {
     float3 nits = pq_to_nits(rgb2020_pq);
     float3 lin = mul(float3x3(
@@ -106,7 +133,7 @@ float4 ps_main(float4 pos : SV_Position) : SV_Target {
             y + 1.4746 * c.y,
             y - 0.16455 * c.x - 0.57135 * c.y,
             y + 1.8814 * c.x);
-        rgb = tonemap_hdr(rgb);
+        rgb = (flags & FLAG_PQ_OUTPUT) != 0 ? fit_to_display(rgb) : tonemap_hdr(rgb);
     } else {
         rgb = float3(
             y + 1.5748 * c.y,
@@ -134,10 +161,11 @@ cbuffer Params : register(b0) {
     float gamma;
     float warmth;
     float radius;
-    float unused;
+    float pq;
+    float levels;
 };
 
-static const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
+#define LUMA (pq > 0.5 ? float3(0.2627, 0.6780, 0.0593) : float3(0.2126, 0.7152, 0.0722))
 
 float hash(float2 p) {
     float3 p3 = frac(float3(p.xyx) * 0.1031);
@@ -207,10 +235,94 @@ float4 ps_main(float4 pos : SV_Position) : SV_Target {
     if (threshold > 0.0) {
         c += (hash(pos.xy * 0.731 + 3.0) - 0.5) * grain;
     }
-    c += (hash(pos.xy + 0.5) + hash(pos.xy * 1.31 + 9.0) - 1.0) / 255.0;
+    c += (hash(pos.xy + 0.5) + hash(pos.xy * 1.31 + 9.0) - 1.0) / levels;
     return float4(saturate(c), 1.0);
 }
 "#;
+
+// HDR10 output: the video (already PQ / BT.2020) goes to the back buffer untouched and the SDR
+// interface, rendered by egui with premultiplied alpha, is converted to PQ and blended on top.
+const COMPOSITE_SHADER: &str = r#"
+Texture2D<float4> ui_tex : register(t0);
+Texture2D<float4> video_tex : register(t1);
+SamplerState linear_sampler : register(s0);
+cbuffer Params : register(b0) {
+    float4 video_rect;
+    float ui_nits;
+    float has_video;
+};
+
+float3 nits_to_pq(float3 nits) {
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    float3 y = pow(saturate(nits / 10000.0), m1);
+    return pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
+}
+
+float4 ps_main(float4 pos : SV_Position) : SV_Target {
+    float3 color = 0.0;
+    if (has_video > 0.5 && all(pos.xy >= video_rect.xy) && all(pos.xy < video_rect.zw)) {
+        float2 uv = (pos.xy - video_rect.xy) / (video_rect.zw - video_rect.xy);
+        color = video_tex.SampleLevel(linear_sampler, uv, 0).rgb;
+    }
+    float4 ui = ui_tex.Load(int3(pos.xy, 0));
+    if (ui.a > 0.0) {
+        float3 lin = pow(saturate(ui.rgb / ui.a), 2.2);
+        float3 wide = mul(float3x3(
+            0.6274, 0.3293, 0.0433,
+            0.0691, 0.9195, 0.0114,
+            0.0164, 0.0880, 0.8956), lin);
+        color = lerp(color, nits_to_pq(wide * ui_nits), ui.a);
+    }
+    return float4(color, 1.0);
+}
+"#;
+
+const UI_WHITE_NITS: f32 = 203.0;
+const DISPLAY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+/// HDR state of the display the window is on.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DisplayInfo {
+    pub hdr: bool,
+    pub peak_nits: f32,
+}
+
+fn display_of_window(hwnd: HWND) -> Option<DisplayInfo> {
+    let mut window = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut window) }.ok()?;
+    let center = (
+        (window.left + window.right) / 2,
+        (window.top + window.bottom) / 2,
+    );
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+    let mut adapter_index = 0;
+    while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
+        adapter_index += 1;
+        let mut output_index = 0;
+        while let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
+            output_index += 1;
+            let Ok(desc) = output
+                .cast::<IDXGIOutput6>()
+                .and_then(|o| unsafe { o.GetDesc1() })
+            else {
+                continue;
+            };
+            let r = desc.DesktopCoordinates;
+            if center.0 >= r.left && center.0 < r.right && center.1 >= r.top && center.1 < r.bottom
+            {
+                return Some(DisplayInfo {
+                    hdr: desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+                    peak_nits: desc.MaxLuminance,
+                });
+            }
+        }
+    }
+    None
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Enhance {
@@ -223,6 +335,7 @@ pub struct Enhance {
 pub(crate) struct RenderTexture {
     pub width: u32,
     pub height: u32,
+    pub format: DXGI_FORMAT,
     pub texture: ID3D11Texture2D,
     pub rtv: ID3D11RenderTargetView,
     pub srv: ID3D11ShaderResourceView,
@@ -261,6 +374,7 @@ impl RenderTexture {
             Ok(Self {
                 width,
                 height,
+                format,
                 texture,
                 rtv: rtv.unwrap(),
                 srv: srv.unwrap(),
@@ -328,6 +442,26 @@ impl Passes {
         sources: &[Option<ID3D11ShaderResourceView>],
         target: &RenderTexture,
     ) {
+        self.draw_to(
+            context,
+            shader,
+            constants,
+            sources,
+            &target.rtv,
+            target.size(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_to(
+        &self,
+        context: &ID3D11DeviceContext,
+        shader: &ID3D11PixelShader,
+        constants: &[u32; 16],
+        sources: &[Option<ID3D11ShaderResourceView>],
+        target: &ID3D11RenderTargetView,
+        size: (u32, u32),
+    ) {
         unsafe {
             context.UpdateSubresource(
                 &self.constants,
@@ -340,12 +474,12 @@ impl Passes {
             let viewport = D3D11_VIEWPORT {
                 TopLeftX: 0.0,
                 TopLeftY: 0.0,
-                Width: target.width as f32,
-                Height: target.height as f32,
+                Width: size.0 as f32,
+                Height: size.1 as f32,
                 MinDepth: 0.0,
                 MaxDepth: 1.0,
             };
-            context.OMSetRenderTargets(Some(&[Some(target.rtv.clone())]), None);
+            context.OMSetRenderTargets(Some(&[Some(target.clone())]), None);
             context.OMSetBlendState(None, None, 0xffff_ffff);
             context.RSSetState(None);
             context.RSSetViewports(Some(&[viewport]));
@@ -419,16 +553,19 @@ pub(crate) fn convert_constants(
     ten_bit: bool,
     better_chroma: bool,
     size: (u32, u32),
+    pq_peak_nits: Option<f32>,
 ) -> [u32; 16] {
     let mut con = [0u32; 16];
-    con[0] = u32::from(hdr) | (u32::from(better_chroma) << 1);
+    con[0] =
+        u32::from(hdr) | (u32::from(better_chroma) << 1) | (u32::from(pq_peak_nits.is_some()) << 2);
+    con[4] = pq_peak_nits.unwrap_or(0.0).clamp(100.0, 10_000.0).to_bits();
     con[1] = u32::from(ten_bit);
     con[2] = (size.0 as f32).to_bits();
     con[3] = (size.1 as f32).to_bits();
     con
 }
 
-pub(crate) fn finish_constants(enhance: &Enhance, size: (u32, u32)) -> [u32; 16] {
+pub(crate) fn finish_constants(enhance: &Enhance, size: (u32, u32), pq: bool) -> [u32; 16] {
     let strength = enhance.deband.clamp(0.0, 1.0);
     let grade = enhance.grade.clamped();
     [
@@ -443,8 +580,8 @@ pub(crate) fn finish_constants(enhance: &Enhance, size: (u32, u32)) -> [u32; 16]
         grade.gamma,
         grade.warmth,
         4.0 * size.1 as f32 / 1080.0,
-        0.0,
-        0.0,
+        if pq { 1.0 } else { 0.0 },
+        if pq { 1023.0 } else { 255.0 },
         0.0,
         0.0,
         0.0,
@@ -455,9 +592,10 @@ pub(crate) fn finish_constants(enhance: &Enhance, size: (u32, u32)) -> [u32; 16]
 /// Decoded YUV frame to the 8 bit RGB texture that everything after it works on:
 /// convert (chroma upsampling, HDR tone mapping) into 16 bit float, then deband and dither.
 pub(crate) struct VideoPipeline {
-    passes: Passes,
+    pub(crate) passes: Passes,
     convert_shader: ID3D11PixelShader,
     finish_shader: ID3D11PixelShader,
+    pub(crate) composite_shader: ID3D11PixelShader,
 }
 
 impl VideoPipeline {
@@ -466,6 +604,7 @@ impl VideoPipeline {
             passes: Passes::new(device)?,
             convert_shader: create_pixel_shader(device, CONVERT_SHADER)?,
             finish_shader: create_pixel_shader(device, FINISH_SHADER)?,
+            composite_shader: create_pixel_shader(device, COMPOSITE_SHADER)?,
         })
     }
 
@@ -478,20 +617,27 @@ impl VideoPipeline {
         ten_bit: bool,
         hdr: bool,
         enhance: Enhance,
+        pq_peak_nits: Option<f32>,
         linear: &RenderTexture,
         rgb: &RenderTexture,
     ) {
         self.passes.draw(
             context,
             &self.convert_shader,
-            &convert_constants(hdr, ten_bit, enhance.better_chroma, linear.size()),
+            &convert_constants(
+                hdr,
+                ten_bit,
+                enhance.better_chroma,
+                linear.size(),
+                pq_peak_nits,
+            ),
             &[Some(luma.clone()), Some(chroma.clone())],
             linear,
         );
         self.passes.draw(
             context,
             &self.finish_shader,
-            &finish_constants(&enhance, linear.size()),
+            &finish_constants(&enhance, linear.size(), pq_peak_nits.is_some()),
             &[Some(linear.srv.clone())],
             rgb,
         );
@@ -503,6 +649,8 @@ pub struct VideoSurface {
     pub height: u32,
     format: i32,
     pub hdr: bool,
+    /// The processed frame stays PQ / BT.2020 for an HDR display instead of being tone mapped.
+    pq: bool,
     yuv: ID3D11Texture2D,
     luma_srv: ID3D11ShaderResourceView,
     chroma_srv: ID3D11ShaderResourceView,
@@ -511,7 +659,7 @@ pub struct VideoSurface {
     pub texture_id: egui::TextureId,
     pub sequence: u64,
     pub has_frame: bool,
-    processed: Option<(u64, Enhance, bool)>,
+    processed: Option<(u64, Enhance, bool, u32)>,
 }
 
 /// How long a frame takes inside the app, smoothed over recent frames.
@@ -561,6 +709,8 @@ impl LatencyMeter {
 /// The texture to show for the current video frame.
 #[derive(Clone, Copy, Debug)]
 pub struct VideoOutput {
+    /// True when the renderer composites the video itself (HDR output) and egui must not draw it.
+    pub composited: bool,
     pub texture_id: egui::TextureId,
     pub size: [u32; 2],
     pub source: [u32; 2],
@@ -583,6 +733,12 @@ pub struct Renderer {
     frame_slot: Option<HANDLE>,
     unpresented: Option<native::FrameTimes>,
     latency: LatencyMeter,
+    hwnd: HWND,
+    display: DisplayInfo,
+    display_checked: Instant,
+    hdr_swap: bool,
+    ui_layer: Option<RenderTexture>,
+    present_srv: Option<ID3D11ShaderResourceView>,
 }
 
 impl Renderer {
@@ -693,7 +849,18 @@ impl Renderer {
             frame_slot,
             unpresented: None,
             latency: LatencyMeter::default(),
+            hwnd,
+            display: display_of_window(hwnd).unwrap_or_default(),
+            display_checked: Instant::now(),
+            hdr_swap: false,
+            ui_layer: None,
+            present_srv: None,
         };
+        log::info!(
+            "Display: HDR {}, peak {:.0} nits",
+            if renderer.display.hdr { "on" } else { "off" },
+            renderer.display.peak_nits
+        );
         renderer.create_back_buffer()?;
         Ok(renderer)
     }
@@ -737,6 +904,91 @@ impl Renderer {
         }
     }
 
+    /// HDR state of the display under the window, refreshed every couple of seconds.
+    pub fn display(&mut self) -> DisplayInfo {
+        if self.display_checked.elapsed() > DISPLAY_CHECK_INTERVAL {
+            self.display_checked = Instant::now();
+            if let Some(display) = display_of_window(self.hwnd)
+                && display != self.display
+            {
+                log::info!(
+                    "Display changed: HDR {}, peak {:.0} nits",
+                    if display.hdr { "on" } else { "off" },
+                    display.peak_nits
+                );
+                self.display = display;
+            }
+        }
+        self.display
+    }
+
+    /// Switches the swap chain between SDR (8 bit BT.709) and HDR10 (10 bit PQ BT.2020).
+    fn set_hdr_swap(&mut self, hdr: bool) {
+        if self.hdr_swap == hdr {
+            return;
+        }
+        let (format, color_space) = if hdr {
+            (
+                DXGI_FORMAT_R10G10B10A2_UNORM,
+                DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+            )
+        } else {
+            (
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+            )
+        };
+        let name = if hdr { "HDR10" } else { "SDR" };
+        self.back_buffer = None;
+        unsafe {
+            self.context.OMSetRenderTargets(None, None);
+            self.context.Flush();
+        }
+        let resized = unsafe {
+            self.swap_chain
+                .ResizeBuffers(0, self.size.0, self.size.1, format, self.swap_flags)
+        };
+        let colored = resized.and_then(|()| {
+            self.swap_chain
+                .cast::<IDXGISwapChain3>()
+                .and_then(|sc| unsafe { sc.SetColorSpace1(color_space) })
+        });
+        match colored {
+            Ok(()) => {
+                self.hdr_swap = hdr;
+                log::info!("Output: {name}");
+            }
+            Err(e) => log::error!("Switching output to {name}: {e}"),
+        }
+        if let Err(e) = self.create_back_buffer() {
+            log::error!("Back buffer: {e}");
+        }
+    }
+
+    /// Presents one frame through the HDR10 path without a stream.
+    #[cfg(test)]
+    pub fn present_hdr_for_test(
+        &mut self,
+        ctx: &egui::Context,
+        output: egui_directx11::RendererOutput,
+    ) -> Result<(), String> {
+        self.set_hdr_swap(true);
+        if !self.hdr_swap {
+            return Err("the swap chain did not switch to HDR10".into());
+        }
+        let back_buffer = self.back_buffer.clone().ok_or("no back buffer")?;
+        self.render_hdr(ctx, output, &back_buffer, None)?;
+        drop(back_buffer);
+        unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) }
+            .ok()
+            .map_err(|e| e.to_string())?;
+        self.set_hdr_swap(false);
+        if self.hdr_swap {
+            return Err("the swap chain did not switch back to SDR".into());
+        }
+        Ok(())
+    }
+
     pub fn tearing_supported(&self) -> bool {
         self.tearing
     }
@@ -756,6 +1008,7 @@ impl Renderer {
     }
 
     pub fn drop_video(&mut self) {
+        self.present_srv = None;
         self.unpresented = None;
         self.latency.reset();
         self.upscaler.reset(&mut self.egui);
@@ -764,11 +1017,18 @@ impl Renderer {
         }
     }
 
-    fn ensure_video(&mut self, width: u32, height: u32, format: i32) -> Result<(), String> {
+    fn ensure_video(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: i32,
+        pq: bool,
+    ) -> Result<(), String> {
         if let Some(v) = &self.video
             && v.width == width
             && v.height == height
             && v.format == format
+            && v.pq == pq
         {
             return Ok(());
         }
@@ -832,7 +1092,12 @@ impl Renderer {
             let linear =
                 RenderTexture::new(&self.device, width, height, DXGI_FORMAT_R16G16B16A16_FLOAT)
                     .map_err(|e| format!("Linear texture: {e}"))?;
-            let rgb = RenderTexture::new(&self.device, width, height, DXGI_FORMAT_B8G8R8A8_UNORM)
+            let rgb_format = if pq {
+                DXGI_FORMAT_R10G10B10A2_UNORM
+            } else {
+                DXGI_FORMAT_B8G8R8A8_UNORM
+            };
+            let rgb = RenderTexture::new(&self.device, width, height, rgb_format)
                 .map_err(|e| format!("RGB texture: {e}"))?;
             self.context
                 .ClearRenderTargetView(&rgb.rtv, &[0.0, 0.0, 0.0, 1.0]);
@@ -850,6 +1115,7 @@ impl Renderer {
                 height,
                 format,
                 hdr: false,
+                pq,
                 yuv,
                 luma_srv: luma_srv.unwrap(),
                 chroma_srv: chroma_srv.unwrap(),
@@ -866,14 +1132,24 @@ impl Renderer {
 
     /// Pulls the newest decoded frame (GPU-to-GPU copy) and runs the enhance passes on it.
     /// Returns true when a new frame was produced.
-    pub fn update_video(&mut self, session: &native::Session, enhance: Enhance) -> bool {
+    ///
+    /// `hdr_output` asks for HDR streams to be shown as HDR10 when the display supports it.
+    pub fn update_video(
+        &mut self,
+        session: &native::Session,
+        enhance: Enhance,
+        hdr_output: bool,
+    ) -> bool {
         let Some(info) = session.frame_info() else {
             return false;
         };
         if info.width == 0 || info.height == 0 {
             return false;
         }
-        if let Err(e) = self.ensure_video(info.width, info.height, info.format) {
+        let display = self.display();
+        let pq = hdr_output && display.hdr && info.hdr != 0;
+        let peak = pq.then_some(display.peak_nits);
+        if let Err(e) = self.ensure_video(info.width, info.height, info.format, pq) {
             log::error!("{e}");
             return false;
         }
@@ -888,7 +1164,12 @@ impl Renderer {
                 video.hdr = info.hdr != 0;
             }
         }
-        let key = (video.sequence, enhance, video.hdr);
+        let key = (
+            video.sequence,
+            enhance,
+            video.hdr,
+            peak.unwrap_or(0.0).to_bits(),
+        );
         if !video.has_frame || video.processed == Some(key) {
             return false;
         }
@@ -899,6 +1180,7 @@ impl Renderer {
             video.format == native::FORMAT_P010,
             video.hdr,
             enhance,
+            peak,
             &video.linear,
             &video.rgb,
         );
@@ -924,8 +1206,16 @@ impl Renderer {
             &video.rgb,
             target,
         );
+        self.present_srv = Some(match scaled {
+            Some(_) => self
+                .upscaler
+                .output_srv()
+                .unwrap_or_else(|| video.rgb.srv.clone()),
+            None => video.rgb.srv.clone(),
+        });
         Some(match scaled {
             Some(s) => VideoOutput {
+                composited: video.pq,
                 texture_id: s.texture_id,
                 size: s.size,
                 source,
@@ -933,6 +1223,7 @@ impl Renderer {
                 hdr: video.hdr,
             },
             None => VideoOutput {
+                composited: video.pq,
                 texture_id: video.texture_id,
                 size: source,
                 source,
@@ -946,24 +1237,77 @@ impl Renderer {
         self.upscaler.rtx_possible()
     }
 
+    fn render_hdr(
+        &mut self,
+        ctx: &egui::Context,
+        output: egui_directx11::RendererOutput,
+        back_buffer: &ID3D11RenderTargetView,
+        video_rect: Option<[f32; 4]>,
+    ) -> Result<(), String> {
+        if self.ui_layer.as_ref().is_none_or(|l| l.size() != self.size) {
+            self.ui_layer = Some(
+                RenderTexture::new(
+                    &self.device,
+                    self.size.0,
+                    self.size.1,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                )
+                .map_err(|e| format!("Interface layer: {e}"))?,
+            );
+        }
+        let layer = self.ui_layer.as_ref().unwrap();
+        unsafe {
+            self.context
+                .OMSetRenderTargets(Some(&[Some(layer.rtv.clone())]), None);
+            self.context
+                .ClearRenderTargetView(&layer.rtv, &[0.0, 0.0, 0.0, 0.0]);
+        }
+        self.egui
+            .render(&self.context, &layer.rtv, ctx, output)
+            .map_err(|e| e.to_string())?;
+        let video = self.present_srv.clone().zip(video_rect);
+        let rect = video.as_ref().map(|(_, r)| *r).unwrap_or_default();
+        let mut constants = [0.0f32; 16];
+        constants[..4].copy_from_slice(&rect);
+        constants[4] = UI_WHITE_NITS;
+        constants[5] = if video.is_some() { 1.0 } else { 0.0 };
+        self.pipeline.passes.draw_to(
+            &self.context,
+            &self.pipeline.composite_shader,
+            &constants.map(f32::to_bits),
+            &[Some(layer.srv.clone()), video.map(|(srv, _)| srv)],
+            back_buffer,
+            self.size,
+        );
+        Ok(())
+    }
+
+    /// `video_rect` is where the interface left room for a composited (HDR) video, in pixels.
     pub fn render(
         &mut self,
         ctx: &egui::Context,
         output: egui_directx11::RendererOutput,
         immediate: bool,
+        video_rect: Option<[f32; 4]>,
     ) -> Result<(), String> {
+        let composite = self.video.as_ref().is_some_and(|v| v.pq && v.has_frame);
+        self.set_hdr_swap(composite);
         let Some(back_buffer) = self.back_buffer.clone() else {
             return Ok(());
         };
-        unsafe {
-            self.context
-                .OMSetRenderTargets(Some(&[Some(back_buffer.clone())]), None);
-            self.context
-                .ClearRenderTargetView(&back_buffer, &[0.04, 0.04, 0.05, 1.0]);
+        if self.hdr_swap {
+            self.render_hdr(ctx, output, &back_buffer, video_rect)?;
+        } else {
+            unsafe {
+                self.context
+                    .OMSetRenderTargets(Some(&[Some(back_buffer.clone())]), None);
+                self.context
+                    .ClearRenderTargetView(&back_buffer, &[0.04, 0.04, 0.05, 1.0]);
+            }
+            self.egui
+                .render(&self.context, &back_buffer, ctx, output)
+                .map_err(|e| e.to_string())?;
         }
-        self.egui
-            .render(&self.context, &back_buffer, ctx, output)
-            .map_err(|e| e.to_string())?;
         let hr = unsafe {
             if immediate && self.tearing {
                 self.swap_chain.Present(0, DXGI_PRESENT_ALLOW_TEARING)

@@ -24,6 +24,8 @@ pub struct VideoView {
     pub scaler: Option<crate::upscale::ScalerKind>,
     pub hdr: bool,
     pub pixel_perfect: bool,
+    /// The renderer draws the video itself (HDR10 output); the interface only leaves room for it.
+    pub composited: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +124,7 @@ pub struct App {
     pub gpu_error: Option<String>,
     pub rtx_possible: bool,
     pub tearing_supported: bool,
+    pub display: crate::render::DisplayInfo,
     pub display_latency: Option<crate::render::DisplayLatency>,
     pub render_device: *mut std::ffi::c_void,
     config_dirty: bool,
@@ -168,6 +171,7 @@ impl App {
             gpu_error: None,
             rtx_possible: false,
             tearing_supported: false,
+            display: Default::default(),
             display_latency: None,
             render_device: std::ptr::null_mut(),
             config_dirty: false,

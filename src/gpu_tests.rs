@@ -264,8 +264,70 @@ fn run(
     hdr: bool,
     enhance: Enhance,
 ) -> (RenderTexture, (u32, u32, Vec<u8>)) {
+    let rgb = run_to(device, context, pipeline, yuv, hdr, enhance, None);
+    let pixels = read_back(device, context, &rgb.texture);
+    (rgb, pixels)
+}
+
+/// 10 bit channels of a R10G10B10A2 texture, row by row.
+fn read_back_10bit(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    texture: &ID3D11Texture2D,
+) -> Vec<[u16; 3]> {
+    unsafe {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        texture.GetDesc(&mut desc);
+        assert_eq!(desc.Format, DXGI_FORMAT_R10G10B10A2_UNORM);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        let mut staging = None;
+        device
+            .CreateTexture2D(&desc, None, Some(&mut staging))
+            .unwrap();
+        let staging = staging.unwrap();
+        context.CopyResource(&staging, texture);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        context
+            .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            .unwrap();
+        let mut out = Vec::with_capacity((desc.Width * desc.Height) as usize);
+        for y in 0..desc.Height as usize {
+            let row = std::slice::from_raw_parts(
+                (mapped.pData as *const u8).add(y * mapped.RowPitch as usize),
+                desc.Width as usize * 4,
+            );
+            for px in row.as_chunks::<4>().0 {
+                let v = u32::from_le_bytes(*px);
+                out.push([
+                    (v & 0x3ff) as u16,
+                    ((v >> 10) & 0x3ff) as u16,
+                    ((v >> 20) & 0x3ff) as u16,
+                ]);
+            }
+        }
+        context.Unmap(&staging, 0);
+        out
+    }
+}
+
+fn run_to(
+    device: &ID3D11Device,
+    context: &ID3D11DeviceContext,
+    pipeline: &VideoPipeline,
+    yuv: &Yuv,
+    hdr: bool,
+    enhance: Enhance,
+    pq_peak_nits: Option<f32>,
+) -> RenderTexture {
     let linear = RenderTexture::new(device, W, H, DXGI_FORMAT_R16G16B16A16_FLOAT).unwrap();
-    let rgb = RenderTexture::new(device, W, H, DXGI_FORMAT_B8G8R8A8_UNORM).unwrap();
+    let format = if pq_peak_nits.is_some() {
+        DXGI_FORMAT_R10G10B10A2_UNORM
+    } else {
+        DXGI_FORMAT_B8G8R8A8_UNORM
+    };
+    let rgb = RenderTexture::new(device, W, H, format).unwrap();
     pipeline.process(
         context,
         &yuv.luma,
@@ -273,11 +335,11 @@ fn run(
         yuv.ten_bit,
         hdr,
         enhance,
+        pq_peak_nits,
         &linear,
         &rgb,
     );
-    let pixels = read_back(device, context, &rgb.texture);
-    (rgb, pixels)
+    rgb
 }
 
 #[test]
@@ -536,9 +598,196 @@ fn swap_chain_presents_in_both_sync_modes() {
             let output = ctx.run_ui(egui::RawInput::default(), |_| {});
             let (renderer_output, _, _) = egui_directx11::split_output(output);
             renderer
-                .render(&ctx, renderer_output, immediate)
+                .render(&ctx, renderer_output, immediate, None)
                 .unwrap_or_else(|e| panic!("present (immediate={immediate}) failed: {e}"));
         }
+    }
+    drop(renderer);
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+}
+
+#[test]
+#[ignore = "prints the connected displays"]
+fn list_displays() {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput6};
+    use windows::core::Interface;
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.unwrap();
+    let mut adapter_index = 0;
+    while let Ok(adapter) = unsafe { factory.EnumAdapters1(adapter_index) } {
+        adapter_index += 1;
+        let mut output_index = 0;
+        while let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
+            output_index += 1;
+            let Ok(output6) = output.cast::<IDXGIOutput6>() else {
+                continue;
+            };
+            let desc = unsafe { output6.GetDesc1() }.unwrap();
+            let name = String::from_utf16_lossy(&desc.DeviceName);
+            let r = desc.DesktopCoordinates;
+            println!(
+                "display {} {}x{} colorspace {:?} bits {} max {:.0} nits, full frame {:.0} nits, min {:.3}",
+                name.trim_end_matches('\0'),
+                r.right - r.left,
+                r.bottom - r.top,
+                desc.ColorSpace,
+                desc.BitsPerColor,
+                desc.MaxLuminance,
+                desc.MaxFullFrameLuminance,
+                desc.MinLuminance
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a Direct3D 11 GPU"]
+fn hdr10_output_keeps_pq_and_fits_the_display() {
+    let (device, context) = device();
+    let pipeline = VideoPipeline::new(&device).unwrap();
+    let plain = Enhance {
+        better_chroma: false,
+        deband: 0.0,
+        clarity: 0.0,
+        grade: ColorGrade::default(),
+    };
+    let hdr = upload_yuv(&device, &hdr_frame(), true);
+    let code = |nits: f32| pq_encode(nits) * 1023.0;
+    let at = |pixels: &[[u16; 3]], x: u32| pixels[(200 * W + x) as usize][1] as f32;
+
+    let open = run_to(
+        &device,
+        &context,
+        &pipeline,
+        &hdr,
+        true,
+        plain,
+        Some(10_000.0),
+    );
+    let open = read_back_10bit(&device, &context, &open.texture);
+    println!(
+        "passthrough: 200 nits {} (expect {:.0}), 1000 nits {} (expect {:.0})",
+        at(&open, W / 5),
+        code(200.0),
+        at(&open, W - 2),
+        code(1000.0)
+    );
+    assert!((at(&open, W / 5) - code(200.0)).abs() < 4.0);
+    assert!((at(&open, W - 2) - code(1000.0)).abs() < 4.0);
+
+    let fitted = run_to(&device, &context, &pipeline, &hdr, true, plain, Some(418.0));
+    let texture = fitted.texture.clone();
+    let fitted_pixels = read_back_10bit(&device, &context, &texture);
+    println!(
+        "418 nit display: 200 nits {}, 1000 nits {} (peak code {:.0})",
+        at(&fitted_pixels, W / 5),
+        at(&fitted_pixels, W - 2),
+        code(418.0)
+    );
+    assert!((at(&fitted_pixels, W / 5) - code(200.0)).abs() < 4.0);
+    assert!(at(&fitted_pixels, W - 2) <= code(418.0) + 1.0);
+    assert!(at(&fitted_pixels, W - 2) > at(&fitted_pixels, W / 2));
+
+    let mut egui = egui_directx11::Renderer::new(&device).unwrap();
+    for (mode, sharpness) in [(Upscaling::Fsr, 0.5), (Upscaling::Auto, 0.0)] {
+        let mut upscaler = Upscaler::new(&device, &context);
+        let scaled = upscaler
+            .process(&mut egui, mode, sharpness, 1, &fitted, Some([3840, 2160]))
+            .expect("HDR upscale");
+        let out = read_back_10bit(&device, &context, &upscaler.output_texture().unwrap());
+        let mid = out[(400 * 3840 + 3840 / 5) as usize][1] as f32;
+        println!("{mode:?}: {:?}, 200 nits after upscale {mid}", scaled.kind);
+        assert!(
+            (mid - code(200.0)).abs() < 8.0,
+            "upscaling changed HDR levels"
+        );
+    }
+
+    let out = RenderTexture::new(&device, 3840, 2160, DXGI_FORMAT_R10G10B10A2_UNORM).unwrap();
+    let mut passes = Vec::new();
+    for vsr in [false, true] {
+        match crate::upscale::run_video_processor_once(&device, &context, &fitted, &out, vsr) {
+            Ok(()) => passes.push(read_back_10bit(&device, &context, &out.texture)),
+            Err(e) => println!("video processor on HDR (vsr={vsr}) failed: {e}"),
+        }
+    }
+    if let [plain_scale, vsr_scale] = passes.as_slice() {
+        let differing = plain_scale
+            .iter()
+            .zip(vsr_scale)
+            .filter(|(a, b)| a.iter().zip(*b).any(|(x, y)| x.abs_diff(*y) > 8))
+            .count();
+        println!(
+            "RTX VSR on HDR10 input changes {:.1}% of pixels",
+            differing as f64 * 100.0 / plain_scale.len() as f64
+        );
+    }
+
+    let ui = RenderTexture::new(&device, 64, 64, DXGI_FORMAT_B8G8R8A8_UNORM).unwrap();
+    let target = RenderTexture::new(&device, 64, 64, DXGI_FORMAT_R10G10B10A2_UNORM).unwrap();
+    let mut constants = [0.0f32; 16];
+    constants[..4].copy_from_slice(&[0.0, 0.0, 64.0, 64.0]);
+    constants[4] = 203.0;
+    constants[5] = 1.0;
+    let composite = |ui_color: [f32; 4]| {
+        unsafe { context.ClearRenderTargetView(&ui.rtv, &ui_color) };
+        pipeline.passes.draw(
+            &context,
+            &pipeline.composite_shader,
+            &constants.map(f32::to_bits),
+            &[Some(ui.srv.clone()), Some(fitted.srv.clone())],
+            &target,
+        );
+        read_back_10bit(&device, &context, &target.texture)[32 * 64 + 32]
+    };
+    let white = composite([1.0, 1.0, 1.0, 1.0]);
+    let hole = composite([0.0, 0.0, 0.0, 0.0]);
+    println!(
+        "composite: white interface {white:?} (expect {:.0}), video through hole {hole:?}",
+        code(203.0)
+    );
+    assert!(white.iter().all(|c| (*c as f32 - code(203.0)).abs() < 4.0));
+    assert!(hole[1] > 0, "the video did not show through the interface");
+}
+
+#[test]
+#[ignore = "needs a Direct3D 11 GPU and a desktop session"]
+fn swap_chain_switches_to_hdr10_and_back() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+    };
+    use windows::core::w;
+
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            w!("pslc hdr test"),
+            WS_OVERLAPPEDWINDOW,
+            0,
+            0,
+            640,
+            360,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    let mut renderer = crate::render::Renderer::new(hwnd, 640, 360).unwrap();
+    println!("display: {:?}", renderer.display());
+    let ctx = egui::Context::default();
+    for _ in 0..2 {
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let (renderer_output, _, _) = egui_directx11::split_output(output);
+        renderer
+            .present_hdr_for_test(&ctx, renderer_output)
+            .unwrap();
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        let (renderer_output, _, _) = egui_directx11::split_output(output);
+        renderer.render(&ctx, renderer_output, false, None).unwrap();
     }
     drop(renderer);
     unsafe {

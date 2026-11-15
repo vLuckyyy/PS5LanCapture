@@ -286,15 +286,13 @@ fn create_rtx(
         video_context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&dest_rect));
         video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&dest_rect));
         video_context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-        video_context.VideoProcessorSetStreamColorSpace1(
-            &processor,
-            0,
-            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
-        );
-        video_context.VideoProcessorSetOutputColorSpace1(
-            &processor,
-            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
-        );
+        let color_space = if source.format == DXGI_FORMAT_R10G10B10A2_UNORM {
+            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+        } else {
+            DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+        };
+        video_context.VideoProcessorSetStreamColorSpace1(&processor, 0, color_space);
+        video_context.VideoProcessorSetOutputColorSpace1(&processor, color_space);
         if enable_vsr {
             let extension = NvidiaStreamExtension {
                 version: 0x1,
@@ -404,6 +402,10 @@ impl Upscaler {
         self.output.as_ref().map(|(t, _)| t.texture.clone())
     }
 
+    pub fn output_srv(&self) -> Option<ID3D11ShaderResourceView> {
+        self.output.as_ref().map(|(t, _)| t.srv.clone())
+    }
+
     pub fn rtx_possible(&self) -> bool {
         self.nvidia && !self.rtx_failed
     }
@@ -423,9 +425,11 @@ impl Upscaler {
         &mut self,
         egui: &mut egui_directx11::Renderer,
         size: (u32, u32),
+        format: DXGI_FORMAT,
     ) -> Option<egui::TextureId> {
         if let Some((target, id)) = &self.output
             && target.size() == size
+            && target.format == format
         {
             return Some(*id);
         }
@@ -433,7 +437,7 @@ impl Upscaler {
             egui.unregister_user_texture(id);
         }
         self.rtx = None;
-        let target = RenderTexture::new(&self.device, size.0, size.1, DXGI_FORMAT_B8G8R8A8_UNORM)
+        let target = RenderTexture::new(&self.device, size.0, size.1, format)
             .map_err(|e| log::warn!("Upscaler output {}x{}: {e}", size.0, size.1))
             .ok()?;
         let id = egui.register_user_texture(target.srv.clone());
@@ -441,12 +445,16 @@ impl Upscaler {
         Some(id)
     }
 
-    fn ensure_intermediate(&mut self, size: (u32, u32)) -> bool {
-        if self.intermediate.as_ref().is_some_and(|t| t.size() == size) {
+    fn ensure_intermediate(&mut self, size: (u32, u32), format: DXGI_FORMAT) -> bool {
+        if self
+            .intermediate
+            .as_ref()
+            .is_some_and(|t| t.size() == size && t.format == format)
+        {
             return true;
         }
         self.rtx = None;
-        match RenderTexture::new(&self.device, size.0, size.1, DXGI_FORMAT_B8G8R8A8_UNORM) {
+        match RenderTexture::new(&self.device, size.0, size.1, format) {
             Ok(t) => {
                 self.intermediate = Some(t);
                 true
@@ -517,9 +525,9 @@ impl Upscaler {
         {
             return Some(active);
         }
-        let texture_id = self.ensure_output(egui, out_size)?;
+        let texture_id = self.ensure_output(egui, out_size, source.format)?;
         let needs_intermediate = scale.is_some() && sharpen;
-        if needs_intermediate && !self.ensure_intermediate(out_size) {
+        if needs_intermediate && !self.ensure_intermediate(out_size, source.format) {
             return None;
         }
 
@@ -605,7 +613,7 @@ impl Upscaler {
         {
             return Some(active);
         }
-        let texture_id = self.ensure_output(egui, size)?;
+        let texture_id = self.ensure_output(egui, size, source.format)?;
         if !self.ensure_fsr() {
             self.reset(egui);
             return None;

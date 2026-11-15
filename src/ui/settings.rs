@@ -146,6 +146,7 @@ fn console_tab(ui: &mut Ui, app: &mut App) {
 fn video_tab(ui: &mut Ui, app: &mut App) {
     let before = app.config.video.clone();
     let tearing_supported = app.tearing_supported;
+    let display = app.display;
     let video = &mut app.config.video;
     egui::Grid::new("video-grid")
         .num_columns(2)
@@ -185,6 +186,17 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             ui.add_enabled_ui(video.hevc, |ui| {
                 ui.checkbox(&mut video.hdr, "Request 10 bit HDR from the PS5")
                     .on_hover_text("Less banding in skies and dark scenes. The app tone maps it for this window and Discord.");
+            });
+            ui.end_row();
+            ui.label("HDR display");
+            ui.add_enabled_ui(video.hevc && video.hdr && display.hdr, |ui| {
+                ui.checkbox(&mut video.hdr_output, "Show HDR on this display (HDR10)")
+                    .on_hover_text("The HDR stream goes to your monitor as real HDR10 instead of being tone mapped. Discord and other screen capture may show washed out colors while this is on.")
+                    .on_disabled_hover_text(if display.hdr {
+                        "Turn on the HDR stream first"
+                    } else {
+                        "HDR is off for this display in Windows (Settings > System > Display > Use HDR)"
+                    });
             });
             ui.end_row();
             ui.label("Decoding");

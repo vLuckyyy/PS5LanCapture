@@ -206,6 +206,7 @@ impl Runner {
                             .look
                             .grade(self.app.config.video.custom_grade),
                     },
+                    self.app.config.video.hdr_output && self.app.wizard.is_none(),
                 );
             }
             None if !self.app.stream.state.is_active() => renderer.drop_video(),
@@ -224,9 +225,14 @@ impl Runner {
                 scaler: v.scaler,
                 hdr: v.hdr,
                 pixel_perfect: settings.upscaling == config::Upscaling::PixelPerfect,
+                composited: v.composited,
             });
         self.app.rtx_possible = renderer.rtx_possible();
         self.app.tearing_supported = renderer.tearing_supported();
+        self.app.display = renderer.display();
+        let video_rect_id = egui::Id::new(ui::widgets::VIDEO_RECT_ID);
+        self.egui_ctx
+            .data_mut(|d| d.remove::<[f32; 4]>(video_rect_id));
         self.app.display_latency = renderer.latency();
 
         let input = egui_winit.take_egui_input(&window);
@@ -239,7 +245,10 @@ impl Runner {
             .unwrap_or(Duration::MAX);
         let (renderer_output, platform_output, _) = egui_directx11::split_output(output);
         egui_winit.handle_platform_output(&window, platform_output);
-        if let Err(e) = renderer.render(&self.egui_ctx, renderer_output, immediate) {
+        let video_rect = self
+            .egui_ctx
+            .data(|d| d.get_temp::<[f32; 4]>(video_rect_id));
+        if let Err(e) = renderer.render(&self.egui_ctx, renderer_output, immediate, video_rect) {
             log::error!("{e}");
             self.app.stream.disconnect();
             let size = window.inner_size();
