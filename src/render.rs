@@ -36,6 +36,7 @@ cbuffer Params : register(b0) {
     uint ten_bit;
     float2 luma_size;
     float peak_nits;
+    float sdr_white_nits;
 };
 
 static const uint FLAG_HDR = 1;
@@ -108,18 +109,15 @@ float3 fit_to_display(float3 rgb2020_pq) {
     return nits_to_pq(nits);
 }
 
+//HDR_TO_SDR
+
 float3 tonemap_hdr(float3 rgb2020_pq) {
     float3 nits = pq_to_nits(rgb2020_pq);
     float3 lin = mul(float3x3(
         1.6605, -0.5876, -0.0728,
         -0.1246, 1.1329, -0.0083,
-        -0.0182, -0.1006, 1.1187), nits) / 203.0;
-    lin = max(lin, 0.0);
-    const float white = 1000.0 / 203.0;
-    float peak = max(max(lin.r, lin.g), lin.b);
-    float mapped = peak * (1.0 + peak / (white * white)) / (1.0 + peak);
-    lin *= peak > 0.0 ? mapped / peak : 0.0;
-    return pow(saturate(lin), 1.0 / 2.2);
+        -0.0182, -0.1006, 1.1187), nits) / sdr_white_nits;
+    return hdr_to_sdr(lin, 1000.0 / sdr_white_nits);
 }
 
 float4 ps_main(float4 pos : SV_Position) : SV_Target {
@@ -240,6 +238,90 @@ float4 ps_main(float4 pos : SV_Position) : SV_Target {
 }
 "#;
 
+// The clean SDR feed for screen sharing: the processed frame letterboxed into a second window.
+// A PQ frame (HDR output) is converted with the same curve as the normal SDR path.
+const SHARE_SHADER: &str = r#"
+Texture2D<float4> video_tex : register(t0);
+SamplerState linear_sampler : register(s0);
+cbuffer Params : register(b0) {
+    float4 video_rect;
+    float pq;
+    float sdr_white_nits;
+    float peak_nits;
+};
+
+float3 pq_to_nits(float3 e) {
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    float3 p = pow(saturate(e), 1.0 / m2);
+    return pow(max(p - c1, 0.0) / (c2 - c3 * p), 1.0 / m1) * 10000.0;
+}
+
+//HDR_TO_SDR
+
+float4 ps_main(float4 pos : SV_Position) : SV_Target {
+    if (any(pos.xy < video_rect.xy) || any(pos.xy >= video_rect.zw)) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
+    float2 uv = (pos.xy - video_rect.xy) / (video_rect.zw - video_rect.xy);
+    float3 c = video_tex.SampleLevel(linear_sampler, uv, 0).rgb;
+    if (pq > 0.5) {
+        float3 lin = mul(float3x3(
+            1.6605, -0.5876, -0.0728,
+            -0.1246, 1.1329, -0.0083,
+            -0.0182, -0.1006, 1.1187), pq_to_nits(c)) / sdr_white_nits;
+        c = hdr_to_sdr(lin, peak_nits / sdr_white_nits);
+    }
+    return float4(c, 1.0);
+}
+"#;
+
+const HDR_TO_SDR_HLSL: &str = r#"
+// HDR to SDR. `lin` is BT.709 light where 1.0 is SDR white; `peak` is the brightest input.
+// Everything up to 75% of SDR white keeps its brightness exactly, only highlights above that
+// are squeezed into the remaining range, so midtones and shadows match the HDR picture.
+float3 hdr_to_sdr(float3 lin, float peak) {
+    const float knee = 0.75;
+    lin = max(lin, 0.0);
+    float top = max(max(lin.r, lin.g), lin.b);
+    if (top > knee && peak > 1.0) {
+        float slope = (peak - knee) / (1.0 - knee);
+        float a = 1.0 / max(slope - 1.0, 1e-3);
+        float t = saturate((top - knee) / (peak - knee));
+        lin *= (knee + (1.0 - knee) * (1.0 + a) * t / (t + a)) / top;
+    }
+    return pow(saturate(lin), 1.0 / 2.2);
+}
+"#;
+
+/// SDR white in nits for HDR to SDR conversion at 100% brightness: a typical SDR monitor.
+pub const SDR_REFERENCE_WHITE_NITS: f32 = 250.0;
+
+pub fn sdr_white_nits(brightness: f32) -> f32 {
+    SDR_REFERENCE_WHITE_NITS / brightness.clamp(0.5, 2.5)
+}
+
+/// Where a `source` sized picture goes inside `target` pixels, keeping its aspect ratio.
+pub fn letterbox(source: (u32, u32), target: (u32, u32)) -> [f32; 4] {
+    let (sw, sh) = (source.0.max(1) as f32, source.1.max(1) as f32);
+    let (tw, th) = (target.0 as f32, target.1 as f32);
+    let scale = (tw / sw).min(th / sh);
+    let (w, h) = ((sw * scale).round(), (sh * scale).round());
+    let (x, y) = (((tw - w) / 2.0).floor(), ((th - h) / 2.0).floor());
+    [x, y, x + w, y + h]
+}
+
+/// Second window that screen sharing captures.
+struct ShareOutput {
+    swap_chain: IDXGISwapChain1,
+    back_buffer: Option<ID3D11RenderTargetView>,
+    size: (u32, u32),
+    dirty: bool,
+}
+
 // HDR10 output: the video (already PQ / BT.2020) goes to the back buffer untouched and the SDR
 // interface, rendered by egui with premultiplied alpha, is converted to PQ and blended on top.
 const COMPOSITE_SHADER: &str = r#"
@@ -330,6 +412,8 @@ pub struct Enhance {
     pub deband: f32,
     pub clarity: f32,
     pub grade: ColorGrade,
+    /// Brightness of HDR video when it is converted to SDR; 1.0 is the reference.
+    pub sdr_brightness: f32,
 }
 
 pub(crate) struct RenderTexture {
@@ -554,11 +638,13 @@ pub(crate) fn convert_constants(
     better_chroma: bool,
     size: (u32, u32),
     pq_peak_nits: Option<f32>,
+    sdr_brightness: f32,
 ) -> [u32; 16] {
     let mut con = [0u32; 16];
     con[0] =
         u32::from(hdr) | (u32::from(better_chroma) << 1) | (u32::from(pq_peak_nits.is_some()) << 2);
     con[4] = pq_peak_nits.unwrap_or(0.0).clamp(100.0, 10_000.0).to_bits();
+    con[5] = sdr_white_nits(sdr_brightness).to_bits();
     con[1] = u32::from(ten_bit);
     con[2] = (size.0 as f32).to_bits();
     con[3] = (size.1 as f32).to_bits();
@@ -596,15 +682,23 @@ pub(crate) struct VideoPipeline {
     convert_shader: ID3D11PixelShader,
     finish_shader: ID3D11PixelShader,
     pub(crate) composite_shader: ID3D11PixelShader,
+    pub(crate) share_shader: ID3D11PixelShader,
 }
 
 impl VideoPipeline {
     pub(crate) fn new(device: &ID3D11Device) -> Result<Self, String> {
         Ok(Self {
             passes: Passes::new(device)?,
-            convert_shader: create_pixel_shader(device, CONVERT_SHADER)?,
+            convert_shader: create_pixel_shader(
+                device,
+                &CONVERT_SHADER.replace("//HDR_TO_SDR", HDR_TO_SDR_HLSL),
+            )?,
             finish_shader: create_pixel_shader(device, FINISH_SHADER)?,
             composite_shader: create_pixel_shader(device, COMPOSITE_SHADER)?,
+            share_shader: create_pixel_shader(
+                device,
+                &SHARE_SHADER.replace("//HDR_TO_SDR", HDR_TO_SDR_HLSL),
+            )?,
         })
     }
 
@@ -630,6 +724,7 @@ impl VideoPipeline {
                 enhance.better_chroma,
                 linear.size(),
                 pq_peak_nits,
+                enhance.sdr_brightness,
             ),
             &[Some(luma.clone()), Some(chroma.clone())],
             linear,
@@ -741,6 +836,7 @@ pub struct Renderer {
     present_srv: Option<ID3D11ShaderResourceView>,
     hdr_expander: HdrExpander,
     hdr_present: bool,
+    share: Option<ShareOutput>,
 }
 
 impl Renderer {
@@ -859,6 +955,7 @@ impl Renderer {
             present_srv: None,
             hdr_expander: HdrExpander::default(),
             hdr_present: false,
+            share: None,
         };
         log::info!(
             "Display: HDR {}, peak {:.0} nits",
@@ -993,6 +1090,138 @@ impl Renderer {
         Ok(())
     }
 
+    /// Starts presenting the clean SDR feed into another window.
+    pub fn open_share(&mut self, hwnd: HWND, width: u32, height: u32) -> Result<(), String> {
+        let dxgi_device: IDXGIDevice = self.device.cast().map_err(|e| e.to_string())?;
+        let adapter = unsafe { dxgi_device.GetAdapter() }.map_err(|e| e.to_string())?;
+        let factory: IDXGIFactory2 = unsafe { adapter.GetParent() }.map_err(|e| e.to_string())?;
+        let size = (width.max(1), height.max(1));
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: size.0,
+            Height: size.1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Stereo: false.into(),
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            Flags: 0,
+        };
+        let swap_chain =
+            unsafe { factory.CreateSwapChainForHwnd(&self.device, hwnd, &desc, None, None) }
+                .map_err(|e| format!("Share window swap chain: {e}"))?;
+        unsafe {
+            let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+        }
+        let mut share = ShareOutput {
+            swap_chain,
+            back_buffer: None,
+            size,
+            dirty: true,
+        };
+        share.back_buffer = Self::back_buffer_of(&self.device, &share.swap_chain).ok();
+        self.share = Some(share);
+        log::info!("Share window opened, {}x{}", size.0, size.1);
+        Ok(())
+    }
+
+    pub fn close_share(&mut self) {
+        if self.share.take().is_some() {
+            unsafe {
+                self.context.OMSetRenderTargets(None, None);
+                self.context.Flush();
+            }
+            log::info!("Share window closed");
+        }
+    }
+
+    pub fn resize_share(&mut self, width: u32, height: u32) {
+        let Some(share) = self.share.as_mut() else {
+            return;
+        };
+        let size = (width.max(1), height.max(1));
+        if size == share.size {
+            return;
+        }
+        share.back_buffer = None;
+        unsafe {
+            self.context.OMSetRenderTargets(None, None);
+            self.context.Flush();
+        }
+        match unsafe {
+            share.swap_chain.ResizeBuffers(
+                0,
+                size.0,
+                size.1,
+                DXGI_FORMAT_UNKNOWN,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )
+        } {
+            Ok(()) => share.size = size,
+            Err(e) => log::error!("Share window ResizeBuffers: {e}"),
+        }
+        share.back_buffer = Self::back_buffer_of(&self.device, &share.swap_chain).ok();
+        share.dirty = true;
+    }
+
+    fn back_buffer_of(
+        device: &ID3D11Device,
+        swap_chain: &IDXGISwapChain1,
+    ) -> Result<ID3D11RenderTargetView, String> {
+        let texture: ID3D11Texture2D =
+            unsafe { swap_chain.GetBuffer(0) }.map_err(|e| e.to_string())?;
+        let mut rtv = None;
+        unsafe { device.CreateRenderTargetView(&texture, None, Some(&mut rtv)) }
+            .map_err(|e| e.to_string())?;
+        rtv.ok_or_else(|| "no render target".to_string())
+    }
+
+    /// Draws the current frame into the share window. `new_frame` says the video changed;
+    /// without it the window is only redrawn after a resize or when the video went away.
+    pub fn present_share(&mut self, new_frame: bool, brightness: f32) {
+        let Some(share) = self.share.as_mut() else {
+            return;
+        };
+        if !new_frame && !share.dirty {
+            return;
+        }
+        let Some(back_buffer) = share.back_buffer.clone() else {
+            return;
+        };
+        share.dirty = false;
+        match self.video.as_ref().filter(|v| v.has_frame) {
+            Some(video) => {
+                let mut constants = [0.0f32; 16];
+                constants[..4].copy_from_slice(&letterbox(video.rgb.size(), share.size));
+                constants[4] = if video.pq { 1.0 } else { 0.0 };
+                constants[5] = sdr_white_nits(brightness);
+                constants[6] = self.display.peak_nits.max(SDR_REFERENCE_WHITE_NITS);
+                self.pipeline.passes.draw_to(
+                    &self.context,
+                    &self.pipeline.share_shader,
+                    &constants.map(f32::to_bits),
+                    &[Some(video.rgb.srv.clone())],
+                    &back_buffer,
+                    share.size,
+                );
+            }
+            None => unsafe {
+                self.context
+                    .ClearRenderTargetView(&back_buffer, &[0.0, 0.0, 0.0, 1.0]);
+            },
+        }
+        drop(back_buffer);
+        let hr = unsafe { share.swap_chain.Present(0, DXGI_PRESENT(0)) };
+        if hr.is_err() {
+            log::warn!("Share window present failed: {hr:?}");
+        }
+    }
+
     pub fn tearing_supported(&self) -> bool {
         self.tearing
     }
@@ -1012,6 +1241,9 @@ impl Renderer {
     }
 
     pub fn drop_video(&mut self) {
+        if let Some(share) = self.share.as_mut() {
+            share.dirty = true;
+        }
         self.present_srv = None;
         self.hdr_present = false;
         self.hdr_expander.reset();
@@ -1342,6 +1574,29 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn letterbox_centers_and_keeps_aspect() {
+        assert_eq!(
+            letterbox((1920, 1080), (1920, 1080)),
+            [0.0, 0.0, 1920.0, 1080.0]
+        );
+        assert_eq!(
+            letterbox((1920, 1080), (1280, 1024)),
+            [0.0, 152.0, 1280.0, 872.0]
+        );
+        assert_eq!(
+            letterbox((1920, 1080), (2000, 1000)),
+            [111.0, 0.0, 1889.0, 1000.0]
+        );
+    }
+
+    #[test]
+    fn brightness_maps_to_sdr_white() {
+        assert_eq!(sdr_white_nits(1.0), 250.0);
+        assert_eq!(sdr_white_nits(2.0), 125.0);
+        assert_eq!(sdr_white_nits(100.0), 100.0);
+    }
 
     #[test]
     fn latency_meter_splits_and_smooths() {

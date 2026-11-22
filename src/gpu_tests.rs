@@ -352,6 +352,7 @@ fn enhance_pipeline_on_gpu() {
         deband: 0.0,
         clarity: 0.0,
         grade: ColorGrade::default(),
+        sdr_brightness: 1.0,
     };
     let full = Enhance {
         better_chroma: true,
@@ -486,8 +487,25 @@ fn enhance_pipeline_on_gpu() {
         gray(W / 2),
         gray(W - 2)
     );
-    assert!(gray(2) < 40 && gray(W / 5) > 120 && gray(W - 2) > gray(W / 2));
-    assert!(gray(W - 2) < 255, "highlights clip instead of rolling off");
+    assert!(gray(2) < 40 && gray(W - 2) > gray(W / 2));
+    assert!(
+        gray(W / 5) > 215,
+        "200 nits should stay close to SDR white, not be darkened"
+    );
+    assert!(gray(W / 2) < 255, "highlights clip instead of rolling off");
+    let brighter = Enhance {
+        sdr_brightness: 1.5,
+        ..full
+    };
+    let (_, lifted) = run(&device, &context, &pipeline, &hdr, true, brighter);
+    let lifted_gray = |x: u32| lifted.2[((200 * W + x) * 4) as usize];
+    println!(
+        "hdr ramp at 150% brightness: ~100 nits {} (was {}), ~200 nits {}",
+        lifted_gray(W / 10),
+        gray(W / 10),
+        lifted_gray(W / 5)
+    );
+    assert!(lifted_gray(W / 10) > gray(W / 10) + 15);
 
     let mut egui = egui_directx11::Renderer::new(&device).unwrap();
     for (mode, sharpness, target, name) in [
@@ -656,6 +674,7 @@ fn hdr10_output_keeps_pq_and_fits_the_display() {
         deband: 0.0,
         clarity: 0.0,
         grade: ColorGrade::default(),
+        sdr_brightness: 1.0,
     };
     let hdr = upload_yuv(&device, &hdr_frame(), true);
     let code = |nits: f32| pq_encode(nits) * 1023.0;
@@ -751,6 +770,40 @@ fn hdr10_output_keeps_pq_and_fits_the_display() {
         );
         read_back_10bit(&device, &context, &target.texture)[32 * 64 + 32]
     };
+    let sdr_path = run_to(&device, &context, &pipeline, &hdr, true, plain, None);
+    let sdr_path = read_back(&device, &context, &sdr_path.texture);
+    let share_target = RenderTexture::new(&device, W, H, DXGI_FORMAT_B8G8R8A8_UNORM).unwrap();
+    let mut share_constants = [0.0f32; 16];
+    share_constants[..4].copy_from_slice(&crate::render::letterbox((W, H), (W, H)));
+    share_constants[4] = 1.0;
+    share_constants[5] = crate::render::sdr_white_nits(1.0);
+    share_constants[6] = 418.0;
+    pipeline.passes.draw(
+        &context,
+        &pipeline.share_shader,
+        &share_constants.map(f32::to_bits),
+        &[Some(fitted.srv.clone())],
+        &share_target,
+    );
+    let shared = read_back(&device, &context, &share_target.texture);
+    let level = |img: &(u32, u32, Vec<u8>), x: u32| img.2[((200 * W + x) * 4) as usize] as i32;
+    println!(
+        "stream window vs SDR path: 100 nits {} / {}, 200 nits {} / {}, 400 nits {} / {}",
+        level(&shared, W / 10),
+        level(&sdr_path, W / 10),
+        level(&shared, W / 5),
+        level(&sdr_path, W / 5),
+        level(&shared, W * 2 / 5),
+        level(&sdr_path, W * 2 / 5)
+    );
+    for x in [W / 20, W / 10, W * 3 / 20] {
+        assert!(
+            (level(&shared, x) - level(&sdr_path, x)).abs() <= 3,
+            "the stream window does not match the SDR picture in the midtones"
+        );
+    }
+    assert!(level(&shared, W / 5) > 215);
+
     let white = composite([1.0, 1.0, 1.0, 1.0]);
     let hole = composite([0.0, 0.0, 0.0, 0.0]);
     println!(
@@ -799,6 +852,31 @@ fn swap_chain_switches_to_hdr10_and_back() {
         let (renderer_output, _, _) = egui_directx11::split_output(output);
         renderer.render(&ctx, renderer_output, false, None).unwrap();
     }
+    let share_hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            w!("pslc share test"),
+            WS_OVERLAPPEDWINDOW,
+            0,
+            0,
+            800,
+            450,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    renderer.open_share(share_hwnd, 800, 450).unwrap();
+    renderer.present_share(false, 1.0);
+    renderer.resize_share(1024, 576);
+    renderer.present_share(true, 1.0);
+    renderer.close_share();
+    unsafe {
+        let _ = DestroyWindow(share_hwnd);
+    }
     drop(renderer);
     unsafe {
         let _ = DestroyWindow(hwnd);
@@ -817,6 +895,7 @@ fn rtx_video_hdr_expands_sdr() {
         deband: 0.0,
         clarity: 0.0,
         grade: ColorGrade::default(),
+        sdr_brightness: 1.0,
     };
     let out = RenderTexture::new(&device, W, H, DXGI_FORMAT_R10G10B10A2_UNORM).unwrap();
     for luma in [235u8, 180, 126, 60] {

@@ -62,6 +62,8 @@ The PS5 sends at most 1080p. When the video on screen is bigger (fullscreen on a
 2. Pick the PS5 LAN Capture window (not the whole screen, so only the game sound is shared).
 3. Do not minimize the window. Discord cannot capture minimized windows.
 
+If you use HDR output, turn on **Settings > Video > Separate stream window for sharing** and share that window instead. It shows clean SDR video without the interface, so viewers get correct brightness while you see HDR. If viewers still see a picture darker than yours, raise **HDR in SDR**.
+
 ## Building from source
 
 You need Rust, Git, Python 3, Visual Studio 2022 Build Tools (C++ workload) and LLVM (clang-cl).

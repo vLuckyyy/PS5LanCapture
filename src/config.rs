@@ -188,6 +188,8 @@ pub struct VideoSettings {
     pub display_sync: DisplaySync,
     pub hdr_output: bool,
     pub rtx_hdr: bool,
+    pub sdr_brightness: f32,
+    pub share_window: bool,
 }
 
 impl Default for VideoSettings {
@@ -209,6 +211,8 @@ impl Default for VideoSettings {
             display_sync: DisplaySync::VSync,
             hdr_output: false,
             rtx_hdr: true,
+            sdr_brightness: 1.0,
+            share_window: false,
         }
     }
 }

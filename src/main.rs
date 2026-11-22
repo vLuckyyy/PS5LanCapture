@@ -66,6 +66,7 @@ struct Runner {
     hidden_to_tray: bool,
     last_session: usize,
     last_redraw: Instant,
+    share_window: Option<Arc<Window>>,
 }
 
 fn decode_icon() -> (Vec<u8>, u32) {
@@ -117,6 +118,46 @@ impl Runner {
         Ok(())
     }
 
+    /// Opens or closes the clean SDR window for screen sharing to match the setting.
+    fn sync_share_window(&mut self, event_loop: &ActiveEventLoop) {
+        let wanted = self.app.config.video.share_window;
+        if wanted == self.share_window.is_some() {
+            return;
+        }
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        if !wanted {
+            renderer.close_share();
+            self.share_window = None;
+            return;
+        }
+        let icon = Icon::from_rgba(self.icon.0.clone(), self.icon.1, self.icon.1).ok();
+        let attributes = Window::default_attributes()
+            .with_title("PS5 LAN Capture: Stream")
+            .with_inner_size(PhysicalSize::new(1280, 720))
+            .with_min_inner_size(LogicalSize::new(320.0, 180.0))
+            .with_window_icon(icon);
+        let opened = event_loop
+            .create_window(attributes)
+            .map_err(|e| e.to_string())
+            .and_then(|window| {
+                let hwnd = Self::window_hwnd(&window).ok_or("No window handle")?;
+                let size = window.inner_size();
+                renderer.open_share(hwnd, size.width, size.height)?;
+                Ok(Arc::new(window))
+            });
+        match opened {
+            Ok(window) => self.share_window = Some(window),
+            Err(e) => {
+                log::error!("Cannot open the share window: {e}");
+                self.app.config.video.share_window = false;
+                self.app
+                    .notify(format!("Cannot open the stream window: {e}"));
+            }
+        }
+    }
+
     fn ensure_tray(&mut self) {
         if self.tray.is_some() {
             return;
@@ -166,8 +207,43 @@ impl Runner {
 
     fn quit(&mut self, event_loop: &ActiveEventLoop) {
         log::info!("Shutting down");
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.close_share();
+        }
+        self.share_window = None;
         self.app.shutdown();
         event_loop.exit();
+    }
+
+    /// Pulls the newest frame into the renderer and feeds the stream window.
+    fn update_video(app: &App, renderer: &mut Renderer, last_session: &mut usize) {
+        let session_id = app.stream.session().map(|s| s.id()).unwrap_or(0);
+        if session_id != *last_session {
+            if session_id != 0 {
+                renderer.drop_video();
+            }
+            *last_session = session_id;
+        }
+        let video = &app.config.video;
+        let mut new_frame = false;
+        match app.stream.session() {
+            Some(session) => {
+                new_frame = renderer.update_video(
+                    session,
+                    render::Enhance {
+                        better_chroma: video.better_chroma,
+                        deband: video.deband,
+                        clarity: video.clarity,
+                        grade: video.look.grade(video.custom_grade),
+                        sdr_brightness: video.sdr_brightness,
+                    },
+                    video.hdr_output && app.wizard.is_none(),
+                );
+            }
+            None if !app.stream.state.is_active() => renderer.drop_video(),
+            None => {}
+        }
+        renderer.present_share(new_frame, video.sdr_brightness);
     }
 
     /// Returns true when the UI asked the app to quit.
@@ -184,34 +260,7 @@ impl Runner {
             renderer.wait_for_frame_slot();
         }
         self.last_redraw = Instant::now();
-        let session_id = self.app.stream.session().map(|s| s.id()).unwrap_or(0);
-        if session_id != self.last_session {
-            if session_id != 0 {
-                renderer.drop_video();
-            }
-            self.last_session = session_id;
-        }
-        match self.app.stream.session() {
-            Some(session) => {
-                renderer.update_video(
-                    session,
-                    render::Enhance {
-                        better_chroma: self.app.config.video.better_chroma,
-                        deband: self.app.config.video.deband,
-                        clarity: self.app.config.video.clarity,
-                        grade: self
-                            .app
-                            .config
-                            .video
-                            .look
-                            .grade(self.app.config.video.custom_grade),
-                    },
-                    self.app.config.video.hdr_output && self.app.wizard.is_none(),
-                );
-            }
-            None if !self.app.stream.state.is_active() => renderer.drop_video(),
-            None => {}
-        }
+        Self::update_video(&self.app, renderer, &mut self.last_session);
         let target = self
             .egui_ctx
             .data(|d| d.get_temp::<[u32; 2]>(egui::Id::new(ui::widgets::VIDEO_TARGET_ID)));
@@ -300,7 +349,25 @@ impl ApplicationHandler<UserEvent> for Runner {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.share_window.as_ref().is_some_and(|w| w.id() == id) {
+            match event {
+                WindowEvent::CloseRequested => {
+                    self.app.config.video.share_window = false;
+                    self.app.mark_dirty();
+                }
+                WindowEvent::Resized(size) => {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.resize_share(size.width, size.height);
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -350,8 +417,14 @@ impl ApplicationHandler<UserEvent> for Runner {
         if !device.is_null() {
             self.app.tick(device);
         }
+        self.sync_share_window(event_loop);
         let Some(window) = &self.window else { return };
         if self.minimized || self.hidden_to_tray {
+            if self.share_window.is_some()
+                && let Some(renderer) = self.renderer.as_mut()
+            {
+                Self::update_video(&self.app, renderer, &mut self.last_session);
+            }
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(100),
             ));
@@ -497,6 +570,7 @@ fn main() {
         hidden_to_tray: false,
         last_session: 0,
         last_redraw: Instant::now(),
+        share_window: None,
     };
     if let Err(e) = event_loop.run_app(&mut runner) {
         log::error!("Event loop ended with an error: {e}");

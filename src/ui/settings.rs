@@ -186,13 +186,13 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
             ui.label("HDR");
             ui.add_enabled_ui(video.hevc, |ui| {
                 ui.checkbox(&mut video.hdr, "Request 10 bit HDR from the PS5")
-                    .on_hover_text("Less banding in skies and dark scenes. The app tone maps it for this window and Discord.");
+                    .on_hover_text("Less banding in skies and dark scenes. Without HDR output the app converts it to SDR for this window and Discord.");
             });
             ui.end_row();
             ui.label("HDR display");
             ui.add_enabled_ui(display.hdr, |ui| {
                 ui.checkbox(&mut video.hdr_output, "Show HDR on this display (HDR10)")
-                    .on_hover_text("An HDR stream goes to your monitor as real HDR10 instead of being tone mapped. Discord and other screen capture may show washed out colors while this is on.")
+                    .on_hover_text("An HDR stream goes to your monitor as real HDR10. Screen capture of this window then looks dark or washed out, so share the separate stream window in Discord instead.")
                     .on_disabled_hover_text("HDR is off for this display in Windows (Settings > System > Display > Use HDR)");
             });
             ui.end_row();
@@ -202,6 +202,17 @@ fn video_tab(ui: &mut Ui, app: &mut App) {
                     .on_hover_text("When the stream is SDR, the NVIDIA driver expands it to HDR up to your display's peak brightness.")
                     .on_disabled_hover_text("Needs an NVIDIA RTX GPU and HDR output turned on");
             });
+            ui.end_row();
+            ui.label("HDR in SDR");
+            ui.add(
+                egui::Slider::new(&mut video.sdr_brightness, 0.5..=2.5)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+            )
+            .on_hover_text("Brightness of an HDR stream wherever it is shown as SDR: this window without HDR output, the stream window and Discord. Raise it when viewers see a picture darker than yours.");
+            ui.end_row();
+            ui.label("Discord");
+            ui.checkbox(&mut video.share_window, "Separate stream window for sharing")
+                .on_hover_text("Opens a second window with clean SDR video and no interface. Share that window in Discord. It stays correct while this window shows HDR.");
             ui.end_row();
             ui.label("Decoding");
             ui.checkbox(&mut video.hardware_decoding, "Hardware (GPU, D3D11VA)");
